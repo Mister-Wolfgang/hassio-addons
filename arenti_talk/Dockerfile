@@ -3,15 +3,21 @@ FROM ${BUILD_FROM}
 
 RUN apk add --no-cache \
     ffmpeg \
+    ffmpeg-dev \
+    gcc \
+    musl-dev \
+    pkgconf \
     libffi-dev \
     openssl-dev \
     opus-dev \
     libvpx-dev \
-    libsrtp-dev
+    libsrtp-dev \
+    cython
 
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir cython && \
+    pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 COPY run.sh /run.sh
