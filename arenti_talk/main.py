@@ -137,14 +137,10 @@ app = FastAPI(title="2way Audio Arenti", lifespan=lifespan)
 @app.middleware("http")
 async def strip_ingress_prefix(request, call_next):
     path = request.scope["path"]
-    ingress = request.headers.get("X-Ingress-Path", "")
-    log.debug("ingress middleware path=%r X-Ingress-Path=%r", path, ingress)
-    if ingress and path.startswith(ingress):
-        request.scope["path"] = path[len(ingress):] or "/"
-    elif path.startswith("/api/hassio_ingress/"):
-        parts = path.split("/", 4)
-        tail = parts[4].lstrip("/") if len(parts) > 4 else ""
-        request.scope["path"] = "/" + tail
+    # Normalize double slashes and empty paths to "/"
+    import re
+    path = re.sub(r"//+", "/", path) or "/"
+    request.scope["path"] = path
     return await call_next(request)
 
 
