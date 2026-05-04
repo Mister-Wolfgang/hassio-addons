@@ -116,22 +116,33 @@ async def _run_one_pipeline(
     cmd: dict = {
         "id": msg_id,
         "type": "assist_pipeline/run",
-        "start_stage": "stt",
+        "start_stage": "wake_word",
         "end_stage": "tts",
-        "input": {"sample_rate": TARGET_RATE},
+        "input": {
+            "sample_rate": TARGET_RATE,
+            "no_vad": False,
+        },
     }
     if pipeline_id:
         cmd["pipeline_id"] = pipeline_id
     await ws.send(json.dumps(cmd))
+    log.info("Pipeline %d started (wake_word → tts)", msg_id)
 
-    # Wait for run-start
+    # Wait for run-start → get stt_binary_handler_id
     handler_id: int | None = None
     while handler_id is None:
-        raw = await asyncio.wait_for(ws.recv(), timeout=10)
+        raw = await asyncio.wait_for(ws.recv(), timeout=15)
         evt = json.loads(raw)
-        if evt.get("type") == "event" and evt.get("event", {}).get("type") == "run-start":
-            handler_id = evt["event"]["data"]["stt_binary_handler_id"]
-            log.info("Pipeline %d started handler_id=%d", msg_id, handler_id)
+        if evt.get("id") != msg_id:
+            continue
+        if evt.get("type") == "event":
+            e = evt.get("event", {})
+            etype = e.get("type")
+            if etype == "run-start":
+                handler_id = e["data"]["stt_binary_handler_id"]
+                log.info("Pipeline %d handler_id=%d", msg_id, handler_id)
+            elif etype == "error":
+                raise RuntimeError(f"Pipeline start error: {e.get('data')}")
 
     prefix = bytes([handler_id])
     chunk_bytes = CHUNK_SAMPLES * 2
