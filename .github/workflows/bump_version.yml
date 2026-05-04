@@ -1,0 +1,41 @@
+name: Bump addon version
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'arenti_talk/**'
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Bump patch version in config.yaml
+        id: bump
+        run: |
+          FILE=arenti_talk/config.yaml
+          CURRENT=$(grep '^version:' $FILE | sed 's/version: "\(.*\)"/\1/')
+          MAJOR=$(echo $CURRENT | cut -d. -f1)
+          MINOR=$(echo $CURRENT | cut -d. -f2)
+          PATCH=$(echo $CURRENT | cut -d. -f3)
+          NEW="$MAJOR.$MINOR.$((PATCH + 1))"
+          sed -i "s/^version: \"$CURRENT\"/version: \"$NEW\"/" $FILE
+          sed -i "s/io.hass.version=\"$CURRENT\"/io.hass.version=\"$NEW\"/" arenti_talk/Dockerfile
+          echo "version=$NEW" >> $GITHUB_OUTPUT
+          echo "Bumped $CURRENT → $NEW"
+
+      - name: Commit version bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add arenti_talk/config.yaml arenti_talk/Dockerfile
+          git diff --staged --quiet || git commit -m "chore: bump version to ${{ steps.bump.outputs.version }} [skip ci]"
+          git push
