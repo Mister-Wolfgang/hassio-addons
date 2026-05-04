@@ -121,6 +121,7 @@ async def _run_one_pipeline(
         "input": {
             "sample_rate": TARGET_RATE,
             "no_vad": False,
+            "wake_word_timeout": None,
         },
     }
     if pipeline_id:
