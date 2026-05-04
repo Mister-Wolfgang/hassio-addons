@@ -26,6 +26,6 @@ RUN chmod +x /run.sh
 CMD ["/run.sh"]
 
 LABEL \
-    io.hass.version="1.0.12" \
+    io.hass.version="1.0.13" \
     io.hass.type="addon" \
     io.hass.arch="aarch64|amd64"
