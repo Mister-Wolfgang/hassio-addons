@@ -290,6 +290,10 @@ async def talk_audio(
         try:
             mts = await _mts_for(cam)
             await talk_file(mts, tmp, volume=VOLUME)
+        except TimeoutError:
+            log.error("[%s] WebRTC connection timeout", camera)
+        except Exception as e:
+            log.error("[%s] talk_file failed: %s", camera, e)
         finally:
             os.unlink(tmp)
 
@@ -310,15 +314,20 @@ async def talk_text(camera: str, req: TTSRequest, background_tasks: BackgroundTa
     cam = _get_camera(camera)
 
     async def _run():
-        mts = await _mts_for(cam)
-        uri = req.wyoming_uri or WYOMING_TTS_URI
-        if uri:
-            voice = req.voice or TTS_VOICE or None
-            lang  = req.lang or TTS_LANGUAGE
-            pcm = await synthesize_to_pcm(uri, req.text, voice=voice, language=lang)
-            await talk_pcm(mts, pcm, volume=VOLUME)
-        else:
-            await talk_tts(mts, req.text, req.lang, volume=VOLUME)
+        try:
+            mts = await _mts_for(cam)
+            uri = req.wyoming_uri or WYOMING_TTS_URI
+            if uri:
+                voice = req.voice or TTS_VOICE or None
+                lang  = req.lang or TTS_LANGUAGE
+                pcm = await synthesize_to_pcm(uri, req.text, voice=voice, language=lang)
+                await talk_pcm(mts, pcm, volume=VOLUME)
+            else:
+                await talk_tts(mts, req.text, req.lang, volume=VOLUME)
+        except TimeoutError:
+            log.error("[%s] WebRTC connection timeout (camera unreachable?)", camera)
+        except Exception as e:
+            log.error("[%s] TTS failed: %s", camera, e)
 
     background_tasks.add_task(_run)
     return {"status": "playing", "camera": camera, "text": req.text}
