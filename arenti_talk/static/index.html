@@ -104,16 +104,16 @@ async function loadCameras() {
       opt.value = name; opt.textContent = name;
       camSel.appendChild(opt);
     }
-    if (prevSel) camSel.value = prevSel;
+    if (prevSel && [...camSel.options].some(o => o.value === prevSel)) camSel.value = prevSel;
   } catch(e) { log('Erreur chargement: ' + e, 'log-err'); }
 }
 
 async function startListen(cam) {
   try {
     const r = await api('POST', '/listen/' + cam);
-    log('Satellite démarré: ' + cam, 'log-ok');
+    log('Satellite démarré: ' + cam + ' — ' + JSON.stringify(r), 'log-ok');
     loadCameras();
-  } catch(e) { log('Erreur: ' + e, 'log-err'); }
+  } catch(e) { log('Erreur startListen(' + cam + '): ' + e, 'log-err'); }
 }
 
 async function stopListen(cam) {
