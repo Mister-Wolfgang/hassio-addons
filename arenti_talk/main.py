@@ -90,19 +90,18 @@ async def _discover_cameras() -> None:
         # ensure unique name if two devices share the same normalized name
         if name in CAMERAS:
             name = f"{name}_{sn[-4:]}"
+        if dev.get("asFriend", False):
+            log.info("Camera '%s' is shared (asFriend) — skipped", name)
+            continue
         ov = overrides.get(name, {})
-        is_shared = bool(dev.get("asFriend", False))
         CAMERAS[name] = {
             "device_id":      str(dev.get("deviceID", dev.get("deviceId", dev.get("deviceid", "")))),
             "host_key":       dev.get("hostKey", ""),
             "sn_num":         sn,
             "audio_source":   ov.get("audio_source", "arenti"),
             "pipeline_id":    ov.get("pipeline_id", None),
-            "listen_enabled": bool(ov.get("listen_enabled", not is_shared)),
-            "shared":         is_shared,
+            "listen_enabled": bool(ov.get("listen_enabled", True)),
         }
-        if is_shared:
-            log.info("Camera '%s' is shared (asFriend) — listen disabled by default", name)
     log.info("Discovered %d camera(s): %s", len(CAMERAS), list(CAMERAS))
 
 
