@@ -50,25 +50,25 @@ class _AudioFileTrack(MediaStreamTrack):
         self._next_send_time: float | None = None
 
     @classmethod
-    def from_file(cls, audio_path: str) -> "_AudioFileTrack":
-        return cls(cls._decode(audio_path))
+    def from_file(cls, audio_path: str, volume: float = 0.2) -> "_AudioFileTrack":
+        return cls(cls._decode(audio_path, volume=volume))
 
     @classmethod
     def from_tone(cls, freq_hz: float = 1000.0, duration_s: float = 3.0) -> "_AudioFileTrack":
         return cls(_generate_sine_frames(freq_hz, duration_s))
 
     @staticmethod
-    def _decode(path: str) -> list[bytes]:
+    def _decode(path: str, volume: float = 0.2) -> list[bytes]:
         import numpy as np
         container = _av.open(path)
         resampler = _av.AudioResampler(format="s16p", layout="mono", rate=SAMPLE_RATE)
         pcm = bytearray()
         for frame in container.decode(audio=0):
             for r in resampler.resample(frame):
-                arr = r.to_ndarray().astype('float32') * 0.2
+                arr = r.to_ndarray().astype('float32') * volume
                 pcm.extend(arr[0].clip(-32768, 32767).astype('<i2').tobytes())
         for r in resampler.resample(None):
-            arr = r.to_ndarray().astype('float32') * 0.2
+            arr = r.to_ndarray().astype('float32') * volume
             pcm.extend(arr[0].clip(-32768, 32767).astype('<i2').tobytes())
         container.close()
         chunks = []
@@ -500,8 +500,8 @@ async def talk_with_track(
     log.info("Talk session done")
 
 
-async def talk_file(mts, audio_path: str) -> None:
-    track = _AudioFileTrack.from_file(audio_path)
+async def talk_file(mts, audio_path: str, volume: float = 0.2) -> None:
+    track = _AudioFileTrack.from_file(audio_path, volume=volume)
     await talk_with_track(mts, track, track.duration)
 
 
@@ -512,12 +512,12 @@ async def talk_tone(mts, freq_hz: float = 1000.0, duration_s: float = 3.0) -> No
     await talk_with_track(mts, track, duration_s)
 
 
-async def talk_tts(mts, text: str, lang: str = "fr") -> None:
+async def talk_tts(mts, text: str, lang: str = "fr", volume: float = 0.2) -> None:
     from gtts import gTTS
     with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
         tmp = f.name
     try:
         gTTS(text=text, lang=lang).save(tmp)
-        await talk_file(mts, tmp)
+        await talk_file(mts, tmp, volume=volume)
     finally:
         os.unlink(tmp)

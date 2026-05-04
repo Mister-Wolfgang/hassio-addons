@@ -26,9 +26,11 @@ if os.path.exists(_OPTIONS_PATH):
         _opts = json.load(_f)
     USERNAME = _opts["arenti_email"]
     PASSWORD = _opts["arenti_password"]
+    VOLUME = float(_opts.get("volume", 0.2))
 else:
     USERNAME = os.environ["ARENTI_USER"]
     PASSWORD = os.environ["ARENTI_PASS"]
+    VOLUME = float(os.environ.get("ARENTI_VOLUME", "0.2"))
 
 CAMERAS: dict[str, dict] = {}
 
@@ -215,7 +217,7 @@ async def talk_audio(
     async def _run():
         try:
             mts = await _mts_for(cam)
-            await talk_file(mts, tmp)
+            await talk_file(mts, tmp, volume=VOLUME)
         finally:
             os.unlink(tmp)
 
@@ -235,7 +237,7 @@ async def talk_text(camera: str, req: TTSRequest, background_tasks: BackgroundTa
 
     async def _run():
         mts = await _mts_for(cam)
-        await talk_tts(mts, req.text, req.lang)
+        await talk_tts(mts, req.text, req.lang, volume=VOLUME)
 
     background_tasks.add_task(_run)
     return {"status": "playing", "camera": camera, "text": req.text}
