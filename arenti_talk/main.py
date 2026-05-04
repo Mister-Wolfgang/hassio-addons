@@ -142,7 +142,8 @@ async def strip_ingress_prefix(request, call_next):
         request.scope["path"] = path[len(ingress):] or "/"
     elif path.startswith("/api/hassio_ingress/"):
         parts = path.split("/", 4)
-        request.scope["path"] = "/" + (parts[4] if len(parts) > 4 else "")
+        tail = parts[4].lstrip("/") if len(parts) > 4 else ""
+        request.scope["path"] = "/" + tail
     return await call_next(request)
 
 
