@@ -350,11 +350,17 @@ async def play_url(camera: str, req: PlayURLRequest, background_tasks: Backgroun
                 "-i", req.url,
                 "-vn", "-ar", "8000", "-ac", "1", "-f", "s16le", "pipe:1",
             ]
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
+            log.info("[%s] ffmpeg cmd: %s", camera, " ".join(cmd[:6]) + " ...")
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+            except Exception as e:
+                log.error("[%s] ffmpeg launch failed: %s", camera, e)
+                track.finish()
+                return
             async def _log_stderr():
                 async for line in proc.stderr:
                     log.warning("[%s] ffmpeg: %s", camera, line.decode().rstrip())
@@ -373,10 +379,14 @@ async def play_url(camera: str, req: PlayURLRequest, background_tasks: Backgroun
                             arr = _np.frombuffer(raw, dtype='<i2').astype('float32') * VOLUME
                             raw = arr.clip(-32768, 32767).astype('<i2').tobytes()
                         track.push_frame(raw)
+                log.info("[%s] ffmpeg returncode=%s", camera, proc.returncode)
             except Exception as e:
                 log.error("[%s] ffmpeg decode error: %s", camera, e)
             finally:
-                proc.kill()
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
                 track.finish()
                 log.info("[%s] ffmpeg stream ended", camera)
 
