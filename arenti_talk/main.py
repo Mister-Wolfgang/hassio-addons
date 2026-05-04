@@ -348,7 +348,9 @@ async def play_url(camera: str, req: PlayURLRequest, background_tasks: Backgroun
                 "ffmpeg", "-loglevel", "warning",
                 "-headers", f"Authorization: Bearer {token}\r\n",
                 "-i", req.url,
-                "-vn", "-ar", "8000", "-ac", "1", "-f", "s16le", "pipe:1",
+                "-vn", "-ar", "8000", "-ac", "1",
+                "-blocksize", "640",
+                "-f", "s16le", "pipe:1",
             ]
             log.info("[%s] ffmpeg cmd: %s", camera, " ".join(cmd[:6]) + " ...")
             try:
