@@ -34,20 +34,31 @@ def _generate_sine_frames(freq_hz: float = 1000.0, duration_s: float = 3.0) -> l
 
 
 class _AudioFileTrack(MediaStreamTrack):
-    """Audio track that sends silence until open() is called, then plays PCM frames.
+    """Audio track: pre-loaded (from_file/from_tone) or streaming (from_stream).
 
-    Pre-decodes to s16 mono 8 kHz so the frame format is constant from the
-    very first recv() call. Each recv() sleeps 20 ms so the aiortc sender never bursts.
+    Streaming mode: push PCM frames via push_frame(), call finish() when done.
+    recv() paces at 40ms wall-clock; in streaming mode waits for frames instead
+    of sending silence when the buffer is empty.
     """
     kind = "audio"
 
-    def __init__(self, frames: list[bytes]):
+    def __init__(self, frames: list[bytes], streaming: bool = False):
         super().__init__()
-        self._frames = frames
+        self._frames = list(frames)
         self._idx = 0
         self._ts = 0
         self._audio_count = 0
         self._next_send_time: float | None = None
+        self._streaming = streaming
+        self._stream_queue: asyncio.Queue[bytes | None] = asyncio.Queue() if streaming else None  # type: ignore
+        self._done_event = asyncio.Event()
+        if not streaming:
+            self._done_event.set()  # pre-loaded: done immediately (wait after sleep)
+
+    @classmethod
+    def from_stream(cls) -> "_AudioFileTrack":
+        """Create a streaming track — feed with push_frame(), close with finish()."""
+        return cls([], streaming=True)
 
     @classmethod
     def from_file(cls, audio_path: str, volume: float = 0.2) -> "_AudioFileTrack":
@@ -56,6 +67,14 @@ class _AudioFileTrack(MediaStreamTrack):
     @classmethod
     def from_tone(cls, freq_hz: float = 1000.0, duration_s: float = 3.0) -> "_AudioFileTrack":
         return cls(_generate_sine_frames(freq_hz, duration_s))
+
+    def push_frame(self, pcm: bytes) -> None:
+        """Push a FRAME_BYTES chunk of s16le PCM (streaming mode only)."""
+        self._stream_queue.put_nowait(pcm)
+
+    def finish(self) -> None:
+        """Signal end of stream."""
+        self._stream_queue.put_nowait(None)
 
     @staticmethod
     def _decode(path: str, volume: float = 0.2) -> list[bytes]:
@@ -77,7 +96,6 @@ class _AudioFileTrack(MediaStreamTrack):
             if len(chunk) < FRAME_BYTES:
                 chunk = chunk + bytes(FRAME_BYTES - len(chunk))
             chunks.append(chunk)
-        # Drop leading near-silent chunks (< 1% amplitude)
         import struct as _struct
         import numpy as _np
         threshold = int(32767 * 0.01)
@@ -87,7 +105,6 @@ class _AudioFileTrack(MediaStreamTrack):
                 chunks.pop(0)
             else:
                 break
-        # Fade-out on last 10 frames to avoid abrupt silence transition
         fade = 10
         for i, chunk in enumerate(chunks[-fade:]):
             arr = _np.frombuffer(chunk, dtype='<i2').astype('float32')
@@ -97,7 +114,7 @@ class _AudioFileTrack(MediaStreamTrack):
 
     @property
     def duration(self) -> float:
-        return len(self._frames) * 0.02
+        return len(self._frames) * 0.040
 
     async def recv(self) -> AudioFrame:
         frame = AudioFrame(format="s16", layout="mono", samples=FRAME_SAMPLES)
@@ -105,18 +122,30 @@ class _AudioFileTrack(MediaStreamTrack):
         frame.sample_rate = SAMPLE_RATE
         frame.time_base = fractions.Fraction(1, SAMPLE_RATE)
 
-        if self._idx < len(self._frames):
-            data = self._frames[self._idx]
-            frame.planes[0].update(data)
-            if self._audio_count == 0:
-                log.info("First audio frame (hex of first 8 bytes): %s", data[:8].hex())
-            self._idx += 1
-            self._audio_count += 1
+        if self._streaming:
+            data = await self._stream_queue.get()
+            if data is None:
+                # stream ended — apply fade-out on last frames via silence padding
+                self._done_event.set()
+                frame.planes[0].update(bytes(FRAME_BYTES))
+            else:
+                frame.planes[0].update(data)
+                if self._audio_count == 0:
+                    log.info("First audio frame (hex): %s", data[:8].hex())
+                self._audio_count += 1
         else:
-            frame.planes[0].update(bytes(FRAME_BYTES))
+            if self._idx < len(self._frames):
+                data = self._frames[self._idx]
+                frame.planes[0].update(data)
+                if self._audio_count == 0:
+                    log.info("First audio frame (hex): %s", data[:8].hex())
+                self._idx += 1
+                self._audio_count += 1
+            else:
+                self._done_event.set()
+                frame.planes[0].update(bytes(FRAME_BYTES))
 
         self._ts += FRAME_SAMPLES
-        # Precise 40ms pacing using wall clock to avoid asyncio.sleep drift
         now = asyncio.get_event_loop().time()
         if self._next_send_time is None:
             self._next_send_time = now + 0.040
@@ -492,7 +521,12 @@ async def talk_with_track(
 
     asyncio.ensure_future(send_local_audio_activate())
 
-    await asyncio.sleep(duration + 2.0)
+    # Wait for track to finish (pre-loaded: duration+2s; streaming: until finish() called)
+    if track._streaming:
+        await track._done_event.wait()
+        await asyncio.sleep(0.5)  # drain last frames
+    else:
+        await asyncio.sleep(duration + 2.0)
     log.info("Audio done — %d audio frames sent", track._audio_count)
     pump_task.cancel()
     await pc.close()

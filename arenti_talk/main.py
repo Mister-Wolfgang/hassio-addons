@@ -14,7 +14,7 @@ from pydantic import BaseModel
 
 from auth import ArentiSession
 from mts import MTSSession
-from webrtc_talk import talk_file, talk_tts, talk_with_track, talk_pcm, _AudioFileTrack
+from webrtc_talk import talk_file, talk_tts, talk_with_track, talk_pcm, _AudioFileTrack, FRAME_BYTES
 from mic_satellite import AudioQueue, run_satellite_loop, pump_rtsp_to_queue
 from wyoming_tts import synthesize_to_pcm
 
@@ -337,41 +337,56 @@ async def play_url(camera: str, req: PlayURLRequest, background_tasks: Backgroun
     cam = _get_camera(camera)
 
     async def _run():
-        tmp = None
+        import numpy as _np
+        log.info("[%s] Streaming URL: %s", camera, req.url[:80])
+        track = _AudioFileTrack.from_stream()
+
+        async def _ffmpeg_decode():
+            """Stream URL → ffmpeg → s16le 8kHz → push frames to track."""
+            token = os.environ.get("SUPERVISOR_TOKEN", "")
+            cmd = [
+                "ffmpeg", "-loglevel", "quiet",
+                "-headers", f"Authorization: Bearer {token}\r\n",
+                "-i", req.url,
+                "-vn", "-ar", "8000", "-ac", "1", "-f", "s16le", "pipe:1",
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            buf = bytearray()
+            try:
+                while True:
+                    chunk = await proc.stdout.read(FRAME_BYTES * 4)
+                    if not chunk:
+                        break
+                    buf.extend(chunk)
+                    while len(buf) >= FRAME_BYTES:
+                        raw = bytes(buf[:FRAME_BYTES])
+                        buf = buf[FRAME_BYTES:]
+                        if VOLUME != 1.0:
+                            arr = _np.frombuffer(raw, dtype='<i2').astype('float32') * VOLUME
+                            raw = arr.clip(-32768, 32767).astype('<i2').tobytes()
+                        track.push_frame(raw)
+            except Exception as e:
+                log.error("[%s] ffmpeg decode error: %s", camera, e)
+            finally:
+                proc.kill()
+                track.finish()
+                log.info("[%s] ffmpeg stream ended", camera)
+
         try:
-            import httpx
-            log.info("[%s] Streaming URL: %s", camera, req.url[:80])
-            # Stream to temp file with size limit (30s max ~5MB)
-            MAX_BYTES = 5 * 1024 * 1024
-            async with httpx.AsyncClient(timeout=httpx.Timeout(10, read=60)) as client:
-                async with client.stream(
-                    "GET", req.url,
-                    headers={"Authorization": f"Bearer {os.environ.get('SUPERVISOR_TOKEN', '')}"},
-                ) as resp:
-                    resp.raise_for_status()
-                    ct = resp.headers.get("content-type", "")
-                    suffix = ".mp3" if "mp3" in ct else ".flac" if "flac" in ct else ".wav"
-                    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
-                        tmp = f.name
-                        total = 0
-                        async for chunk in resp.aiter_bytes(chunk_size=8192):
-                            f.write(chunk)
-                            total += len(chunk)
-                            if total >= MAX_BYTES:
-                                break
-            log.info("[%s] Downloaded %d bytes suffix=%s", camera, total, suffix)
             mts = await _mts_for(cam)
-            await talk_file(mts, tmp, volume=VOLUME)
+            decode_task = asyncio.ensure_future(_ffmpeg_decode())
+            try:
+                await talk_with_track(mts, track, duration=0, audio_queue=None)
+            finally:
+                decode_task.cancel()
         except TimeoutError:
             log.error("[%s] WebRTC connection timeout", camera)
         except Exception as e:
             log.error("[%s] play_url failed: %s", camera, e)
-        finally:
-            if tmp:
-                try:
-                    os.unlink(tmp)
-                except Exception:
-                    pass
 
     background_tasks.add_task(_run)
     return {"status": "playing", "camera": camera, "url": req.url}

@@ -1,0 +1,17 @@
+services:
+  arenti-talk:
+    build: .
+    container_name: arenti-talk
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - ARENTI_USER=${ARENTI_USER}
+      - ARENTI_PASS=${ARENTI_PASS}
+      # Get these from GET /devices once logged in
+      - CAM_SALON_ID=${CAM_SALON_ID}
+      - CAM_SALON_KEY=${CAM_SALON_KEY}
+      - CAM_RAPHAEL_ID=${CAM_RAPHAEL_ID}
+      - CAM_RAPHAEL_KEY=${CAM_RAPHAEL_KEY}
+      - CAM_SIRIUS_ID=${CAM_SIRIUS_ID}
+      - CAM_SIRIUS_KEY=${CAM_SIRIUS_KEY}
