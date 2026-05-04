@@ -79,6 +79,7 @@ async function loadCameras() {
     const [cams, listening] = await Promise.all([api('GET','/cameras'), api('GET','/listen')]);
     listenState = listening;
     const camSel = document.getElementById('tts-cam');
+    const prevSel = camSel.value;
     camSel.innerHTML = '';
     const container = document.getElementById('cameras');
     container.innerHTML = '';
@@ -103,6 +104,7 @@ async function loadCameras() {
       opt.value = name; opt.textContent = name;
       camSel.appendChild(opt);
     }
+    if (prevSel) camSel.value = prevSel;
   } catch(e) { log('Erreur chargement: ' + e, 'log-err'); }
 }
 
