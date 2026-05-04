@@ -337,8 +337,10 @@ async def play_url(camera: str, req: PlayURLRequest, background_tasks: Backgroun
     cam = _get_camera(camera)
 
     async def _run():
+        tmp = None
         try:
             import httpx
+            log.info("[%s] Downloading URL: %s", camera, req.url[:80])
             async with httpx.AsyncClient(timeout=60) as client:
                 resp = await client.get(
                     req.url,
@@ -346,6 +348,7 @@ async def play_url(camera: str, req: PlayURLRequest, background_tasks: Backgroun
                 )
                 resp.raise_for_status()
                 ct = resp.headers.get("content-type", "")
+                log.info("[%s] Downloaded %d bytes content-type=%s", camera, len(resp.content), ct)
                 suffix = ".mp3" if "mp3" in ct else ".flac" if "flac" in ct else ".wav"
                 with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
                     f.write(resp.content)
@@ -357,10 +360,11 @@ async def play_url(camera: str, req: PlayURLRequest, background_tasks: Backgroun
         except Exception as e:
             log.error("[%s] play_url failed: %s", camera, e)
         finally:
-            try:
-                os.unlink(tmp)
-            except Exception:
-                pass
+            if tmp:
+                try:
+                    os.unlink(tmp)
+                except Exception:
+                    pass
 
     background_tasks.add_task(_run)
     return {"status": "playing", "camera": camera, "url": req.url}
