@@ -172,8 +172,6 @@ async def _run_one_pipeline(
             buf.extend(pcm16k)
             while len(buf) >= chunk_bytes:
                 chunk = bytes(buf[:chunk_bytes])
-                rms = int(np.sqrt(np.mean(np.frombuffer(chunk[1:], dtype=np.int16).astype(np.float32)**2)))
-                log.debug("Audio chunk rms=%d bytes=%d", rms, len(chunk))
                 await ws.send(prefix + chunk)
                 buf = buf[chunk_bytes:]
         await ws.send(prefix)  # end of audio
