@@ -108,10 +108,9 @@ def _get_camera(name: str) -> dict:
 async def _mts_for(cam: dict) -> MTSSession:
     sess = await get_session()
     mts = MTSSession(
-        user_token=sess.user_token,
-        user_id=sess.user_id,
+        sess=sess,
         device_id=cam["device_id"],
-        host_key=cam["host_key"],
+        device_code=cam["sn_num"],
     )
     await mts.connect()
     return mts
