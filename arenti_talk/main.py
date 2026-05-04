@@ -89,14 +89,18 @@ async def _discover_cameras() -> None:
         if name in CAMERAS:
             name = f"{name}_{sn[-4:]}"
         ov = overrides.get(name, {})
+        is_shared = bool(dev.get("asFriend", False))
         CAMERAS[name] = {
             "device_id":      str(dev.get("deviceID", dev.get("deviceId", dev.get("deviceid", "")))),
             "host_key":       dev.get("hostKey", ""),
             "sn_num":         sn,
             "audio_source":   ov.get("audio_source", "arenti"),
             "pipeline_id":    ov.get("pipeline_id", None),
-            "listen_enabled": bool(ov.get("listen_enabled", True)),
+            "listen_enabled": bool(ov.get("listen_enabled", not is_shared)),
+            "shared":         is_shared,
         }
+        if is_shared:
+            log.info("Camera '%s' is shared (asFriend) — listen disabled by default", name)
     log.info("Discovered %d camera(s): %s", len(CAMERAS), list(CAMERAS))
 
 
@@ -196,6 +200,7 @@ async def _listen_session(cam: dict, camera_name: str) -> None:
                     log.error("[%s] MTS connect failed: %s — retry in 10s", camera_name, e)
                     await asyncio.sleep(10)
                     continue
+                inner_stop = asyncio.Event()
                 webrtc_task = asyncio.ensure_future(
                     talk_with_track(mts, silence_track, duration=3600.0, audio_queue=queue)
                 )
@@ -203,17 +208,34 @@ async def _listen_session(cam: dict, camera_name: str) -> None:
                     run_satellite_loop(queue, camera_name,
                                        pipeline_id=pipeline_id,
                                        on_tts_url=on_tts_url,
-                                       stop_event=stop_event)
+                                       stop_event=inner_stop)
                 )
+
+                def _on_webrtc_done(t):
+                    # WebRTC ended (failed/closed) → stop satellite too
+                    inner_stop.set()
+                    queue.stop()
+
+                webrtc_task.add_done_callback(_on_webrtc_done)
+
                 try:
                     await asyncio.gather(webrtc_task, sat_task)
                 except asyncio.CancelledError:
+                    inner_stop.set()
+                    queue.stop()
                     break
                 except Exception as e:
                     log.error("[%s] Session error: %s — restarting in 5s", camera_name, e)
+                finally:
                     webrtc_task.cancel()
                     sat_task.cancel()
-                    await asyncio.sleep(5)
+                    inner_stop.set()
+                    queue.stop()
+
+                if stop_event.is_set():
+                    break
+                log.info("[%s] WebRTC session ended — restarting in 5s", camera_name)
+                await asyncio.sleep(5)
         else:
             queue = AudioQueue()
             rtsp_task = asyncio.ensure_future(pump_rtsp_to_queue(audio_source, queue))
