@@ -19,7 +19,7 @@ from mic_satellite import AudioQueue, run_satellite_loop, pump_rtsp_to_queue
 from wyoming_tts import synthesize_to_pcm
 
 log = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 logging.getLogger("aioice").setLevel(logging.WARNING)
 logging.getLogger("aiortc").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -138,6 +138,7 @@ app = FastAPI(title="2way Audio Arenti", lifespan=lifespan)
 async def strip_ingress_prefix(request, call_next):
     path = request.scope["path"]
     ingress = request.headers.get("X-Ingress-Path", "")
+    log.debug("ingress middleware path=%r X-Ingress-Path=%r", path, ingress)
     if ingress and path.startswith(ingress):
         request.scope["path"] = path[len(ingress):] or "/"
     elif path.startswith("/api/hassio_ingress/"):
