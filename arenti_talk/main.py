@@ -74,7 +74,7 @@ async def _discover_cameras() -> None:
             name = f"{name}_{sn[-4:]}"
         ov = overrides.get(name, {})
         CAMERAS[name] = {
-            "device_id":    str(dev.get("deviceId", dev.get("deviceid", ""))),
+            "device_id":    str(dev.get("deviceID", dev.get("deviceId", dev.get("deviceid", "")))),
             "host_key":     dev.get("hostKey", ""),
             "sn_num":       sn,
             "audio_source": ov.get("audio_source", "arenti"),
