@@ -107,12 +107,12 @@ def _get_camera(name: str) -> dict:
 
 async def _mts_for(cam: dict) -> MTSSession:
     sess = await get_session()
-    mts = MTSSession(
-        sess=sess,
-        device_id=cam["device_id"],
-        device_code=cam["sn_num"],
-    )
+    mts = MTSSession(sess=sess, device_id=cam["device_id"], device_code=cam["sn_num"])
+    await mts.wake_up()
+    await mts.get_host_key()
+    await mts.get_wss_token()
     await mts.connect()
+    await mts.handshake()
     return mts
 
 
