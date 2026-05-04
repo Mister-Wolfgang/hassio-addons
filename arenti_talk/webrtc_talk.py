@@ -521,3 +521,28 @@ async def talk_tts(mts, text: str, lang: str = "fr", volume: float = 0.2) -> Non
         await talk_file(mts, tmp, volume=volume)
     finally:
         os.unlink(tmp)
+
+
+async def talk_pcm(mts, pcm_s16le_8k: bytes, volume: float = 1.0) -> None:
+    """Play raw s16le 8kHz PCM on camera (e.g. from Wyoming TTS)."""
+    import struct as _struct
+    # Split into FRAME_BYTES chunks
+    chunks = []
+    for i in range(0, len(pcm_s16le_8k), FRAME_BYTES):
+        chunk = pcm_s16le_8k[i:i + FRAME_BYTES]
+        if len(chunk) < FRAME_BYTES:
+            chunk = chunk + bytes(FRAME_BYTES - len(chunk))
+        if volume != 1.0:
+            import numpy as _np
+            arr = _np.frombuffer(chunk, dtype='<i2').astype('float32') * volume
+            chunk = arr.clip(-32768, 32767).astype('<i2').tobytes()
+        chunks.append(chunk)
+    # Fade-out
+    fade = min(10, len(chunks))
+    import numpy as _np
+    for i, chunk in enumerate(chunks[-fade:]):
+        arr = _np.frombuffer(chunk, dtype='<i2').astype('float32')
+        arr *= (fade - i) / fade
+        chunks[len(chunks) - fade + i] = arr.clip(-32768, 32767).astype('<i2').tobytes()
+    track = _AudioFileTrack(frames=chunks)
+    await talk_with_track(mts, track, track.duration)

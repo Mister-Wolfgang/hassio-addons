@@ -32,12 +32,18 @@ options:
   arenti_email: ""
   arenti_password: ""
   volume: 0.2
+  wyoming_tts_uri: ""
+  tts_voice: ""
+  tts_language: "fr"
   camera_overrides: []
 
 schema:
   arenti_email: email
   arenti_password: password
   volume: "float(0.0,1.0)"
+  wyoming_tts_uri: "str?"
+  tts_voice: "str?"
+  tts_language: "str?"
   camera_overrides:
     - name: str
       audio_source: "str?"

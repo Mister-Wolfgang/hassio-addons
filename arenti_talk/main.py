@@ -11,8 +11,9 @@ from pydantic import BaseModel
 
 from auth import ArentiSession
 from mts import MTSSession
-from webrtc_talk import talk_file, talk_tts, talk_with_track, _AudioFileTrack
+from webrtc_talk import talk_file, talk_tts, talk_with_track, talk_pcm, _AudioFileTrack
 from mic_satellite import AudioQueue, run_satellite, pump_rtsp_to_queue
+from wyoming_tts import synthesize_to_pcm
 
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -24,13 +25,19 @@ _OPTIONS_PATH = os.environ.get("OPTIONS_PATH", "/data/options.json")
 if os.path.exists(_OPTIONS_PATH):
     with open(_OPTIONS_PATH) as _f:
         _opts = json.load(_f)
-    USERNAME = _opts["arenti_email"]
-    PASSWORD = _opts["arenti_password"]
-    VOLUME = float(_opts.get("volume", 0.2))
+    USERNAME        = _opts["arenti_email"]
+    PASSWORD        = _opts["arenti_password"]
+    VOLUME          = float(_opts.get("volume", 0.2))
+    WYOMING_TTS_URI = _opts.get("wyoming_tts_uri", "")
+    TTS_VOICE       = _opts.get("tts_voice", "")
+    TTS_LANGUAGE    = _opts.get("tts_language", "fr")
 else:
-    USERNAME = os.environ["ARENTI_USER"]
-    PASSWORD = os.environ["ARENTI_PASS"]
-    VOLUME = float(os.environ.get("ARENTI_VOLUME", "0.2"))
+    USERNAME        = os.environ["ARENTI_USER"]
+    PASSWORD        = os.environ["ARENTI_PASS"]
+    VOLUME          = float(os.environ.get("ARENTI_VOLUME", "0.2"))
+    WYOMING_TTS_URI = os.environ.get("WYOMING_TTS_URI", "")
+    TTS_VOICE       = os.environ.get("TTS_VOICE", "")
+    TTS_LANGUAGE    = os.environ.get("TTS_LANGUAGE", "fr")
 
 CAMERAS: dict[str, dict] = {}
 
@@ -228,16 +235,25 @@ async def talk_audio(
 class TTSRequest(BaseModel):
     text: str
     lang: str = "fr"
+    voice: str = ""         # Wyoming voice name override
+    wyoming_uri: str = ""   # Wyoming URI override
 
 
 @app.post("/tts/{camera}")
 async def talk_text(camera: str, req: TTSRequest, background_tasks: BackgroundTasks):
-    """TTS text → camera speaker."""
+    """TTS text → camera speaker. Uses Wyoming TTS if configured, else gTTS."""
     cam = _get_camera(camera)
 
     async def _run():
         mts = await _mts_for(cam)
-        await talk_tts(mts, req.text, req.lang, volume=VOLUME)
+        uri = req.wyoming_uri or WYOMING_TTS_URI
+        if uri:
+            voice = req.voice or TTS_VOICE or None
+            lang  = req.lang or TTS_LANGUAGE
+            pcm = await synthesize_to_pcm(uri, req.text, voice=voice, language=lang)
+            await talk_pcm(mts, pcm, volume=VOLUME)
+        else:
+            await talk_tts(mts, req.text, req.lang, volume=VOLUME)
 
     background_tasks.add_task(_run)
     return {"status": "playing", "camera": camera, "text": req.text}
