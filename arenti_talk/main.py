@@ -327,6 +327,45 @@ async def talk_audio(
     return {"status": "playing", "camera": camera}
 
 
+class PlayURLRequest(BaseModel):
+    url: str
+
+
+@app.post("/play_url/{camera}")
+async def play_url(camera: str, req: PlayURLRequest, background_tasks: BackgroundTasks):
+    """Download audio URL and play on camera speaker."""
+    cam = _get_camera(camera)
+
+    async def _run():
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=60) as client:
+                resp = await client.get(
+                    req.url,
+                    headers={"Authorization": f"Bearer {os.environ.get('SUPERVISOR_TOKEN', '')}"},
+                )
+                resp.raise_for_status()
+                ct = resp.headers.get("content-type", "")
+                suffix = ".mp3" if "mp3" in ct else ".flac" if "flac" in ct else ".wav"
+                with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+                    f.write(resp.content)
+                    tmp = f.name
+            mts = await _mts_for(cam)
+            await talk_file(mts, tmp, volume=VOLUME)
+        except TimeoutError:
+            log.error("[%s] WebRTC connection timeout", camera)
+        except Exception as e:
+            log.error("[%s] play_url failed: %s", camera, e)
+        finally:
+            try:
+                os.unlink(tmp)
+            except Exception:
+                pass
+
+    background_tasks.add_task(_run)
+    return {"status": "playing", "camera": camera, "url": req.url}
+
+
 class TTSRequest(BaseModel):
     text: str
     lang: str = "fr"

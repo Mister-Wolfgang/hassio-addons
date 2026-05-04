@@ -60,16 +60,11 @@ class ArentiMediaPlayer(MediaPlayerEntity):
         session = async_get_clientsession(self.hass)
         try:
             if media_id.startswith("http"):
-                async with session.get(media_id) as resp:
-                    data = await resp.read()
-                    ct = resp.headers.get("Content-Type", "audio/mpeg")
-                suffix = ".mp3" if "mp3" in ct else ".wav"
-                form = aiohttp.FormData()
-                form.add_field("file", data, filename=f"audio{suffix}", content_type=ct)
                 async with session.post(
-                    f"{self._api_url}/talk/{self._camera_name}", data=form
+                    f"{self._api_url}/play_url/{self._camera_name}",
+                    json={"url": media_id},
                 ) as r:
-                    pass
+                    _LOGGER.info("[%s] play_url response: %s", self._camera_name, r.status)
             else:
                 async with session.post(
                     f"{self._api_url}/tts/{self._camera_name}",
