@@ -340,19 +340,26 @@ async def play_url(camera: str, req: PlayURLRequest, background_tasks: Backgroun
         tmp = None
         try:
             import httpx
-            log.info("[%s] Downloading URL: %s", camera, req.url[:80])
-            async with httpx.AsyncClient(timeout=60) as client:
-                resp = await client.get(
-                    req.url,
+            log.info("[%s] Streaming URL: %s", camera, req.url[:80])
+            # Stream to temp file with size limit (30s max ~5MB)
+            MAX_BYTES = 5 * 1024 * 1024
+            async with httpx.AsyncClient(timeout=httpx.Timeout(10, read=60)) as client:
+                async with client.stream(
+                    "GET", req.url,
                     headers={"Authorization": f"Bearer {os.environ.get('SUPERVISOR_TOKEN', '')}"},
-                )
-                resp.raise_for_status()
-                ct = resp.headers.get("content-type", "")
-                log.info("[%s] Downloaded %d bytes content-type=%s", camera, len(resp.content), ct)
-                suffix = ".mp3" if "mp3" in ct else ".flac" if "flac" in ct else ".wav"
-                with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
-                    f.write(resp.content)
-                    tmp = f.name
+                ) as resp:
+                    resp.raise_for_status()
+                    ct = resp.headers.get("content-type", "")
+                    suffix = ".mp3" if "mp3" in ct else ".flac" if "flac" in ct else ".wav"
+                    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+                        tmp = f.name
+                        total = 0
+                        async for chunk in resp.aiter_bytes(chunk_size=8192):
+                            f.write(chunk)
+                            total += len(chunk)
+                            if total >= MAX_BYTES:
+                                break
+            log.info("[%s] Downloaded %d bytes suffix=%s", camera, total, suffix)
             mts = await _mts_for(cam)
             await talk_file(mts, tmp, volume=VOLUME)
         except TimeoutError:
