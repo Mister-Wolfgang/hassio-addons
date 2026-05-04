@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import tempfile
 from contextlib import asynccontextmanager
 
@@ -105,8 +106,23 @@ async def _discover_cameras() -> None:
     log.info("Discovered %d camera(s): %s", len(CAMERAS), list(CAMERAS))
 
 
+def _install_custom_component() -> None:
+    src = "/app/custom_components/arenti_talk"
+    dst = "/config/custom_components/arenti_talk"
+    if not os.path.isdir(src):
+        return
+    try:
+        if os.path.isdir(dst):
+            shutil.rmtree(dst)
+        shutil.copytree(src, dst)
+        log.info("Custom component installed to %s", dst)
+    except Exception as e:
+        log.error("Failed to install custom component: %s", e)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _install_custom_component()
     await _discover_cameras()
     yield
     for task in _listen_tasks.values():

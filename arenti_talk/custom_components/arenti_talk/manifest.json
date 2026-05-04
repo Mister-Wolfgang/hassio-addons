@@ -1,0 +1,10 @@
+{
+  "domain": "arenti_talk",
+  "name": "Arenti Talk",
+  "version": "1.0.0",
+  "documentation": "https://github.com/Mister-Wolfgang/hassio-addons",
+  "dependencies": [],
+  "codeowners": ["@Mister-Wolfgang"],
+  "requirements": [],
+  "iot_class": "local_push"
+}
