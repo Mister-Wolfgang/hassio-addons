@@ -15,8 +15,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        env:
-          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -25,13 +23,13 @@ jobs:
         id: bump
         run: |
           FILE=arenti_talk/config.yaml
-          CURRENT=$(grep '^version:' $FILE | sed 's/version: "\(.*\)"/\1/')
-          MAJOR=$(echo $CURRENT | cut -d. -f1)
-          MINOR=$(echo $CURRENT | cut -d. -f2)
-          PATCH=$(echo $CURRENT | cut -d. -f3)
+          CURRENT=$(grep '^version:' "$FILE" | sed 's/version: *"\?\([0-9][0-9.]*\)"\?/\1/')
+          MAJOR=$(echo "$CURRENT" | cut -d. -f1)
+          MINOR=$(echo "$CURRENT" | cut -d. -f2)
+          PATCH=$(echo "$CURRENT" | cut -d. -f3)
           NEW="$MAJOR.$MINOR.$((PATCH + 1))"
-          sed -i "s/^version: \"$CURRENT\"/version: \"$NEW\"/" $FILE
-          sed -i "s/io.hass.version=\"$CURRENT\"/io.hass.version=\"$NEW\"/" arenti_talk/Dockerfile
+          sed -i "s/^version:.*/version: \"$NEW\"/" "$FILE"
+          sed -i "s/io\.hass\.version=\"[^\"]*\"/io.hass.version=\"$NEW\"/" arenti_talk/Dockerfile
           echo "version=$NEW" >> $GITHUB_OUTPUT
           echo "Bumped $CURRENT → $NEW"
 
