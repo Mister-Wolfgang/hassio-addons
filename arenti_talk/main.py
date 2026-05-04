@@ -60,14 +60,23 @@ async def _discover_cameras() -> None:
             for ov in json.load(_f).get("camera_overrides", []):
                 overrides[ov["name"].lower().replace(" ", "_")] = ov
 
+    import unicodedata
+    seen_sn: set[str] = set()
     for dev in devices:
-        name = dev.get("deviceName", dev.get("snNum", "unknown")).lower().replace(" ", "_")
+        sn = dev.get("snNum", "")
+        if sn in seen_sn:
+            continue
+        seen_sn.add(sn)
+        raw = dev.get("deviceName", sn or "unknown")
+        name = unicodedata.normalize("NFD", raw).encode("ascii", "ignore").decode().lower().replace(" ", "_")
+        # ensure unique name if two devices share the same normalized name
+        if name in CAMERAS:
+            name = f"{name}_{sn[-4:]}"
         ov = overrides.get(name, {})
         CAMERAS[name] = {
             "device_id":    str(dev.get("deviceId", dev.get("deviceid", ""))),
             "host_key":     dev.get("hostKey", ""),
-            "sn_num":       dev.get("snNum", ""),
-            # "arenti" = RTP from WebRTC session, or "rtsp:<url>" for custom source
+            "sn_num":       sn,
             "audio_source": ov.get("audio_source", "arenti"),
             "pipeline_id":  ov.get("pipeline_id", None),
         }
