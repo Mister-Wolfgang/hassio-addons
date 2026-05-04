@@ -133,6 +133,19 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="2way Audio Arenti", lifespan=lifespan)
 
+
+@app.middleware("http")
+async def strip_ingress_prefix(request, call_next):
+    path = request.scope["path"]
+    ingress = request.headers.get("X-Ingress-Path", "")
+    if ingress and path.startswith(ingress):
+        request.scope["path"] = path[len(ingress):] or "/"
+    elif path.startswith("/api/hassio_ingress/"):
+        parts = path.split("/", 4)
+        request.scope["path"] = "/" + (parts[4] if len(parts) > 4 else "")
+    return await call_next(request)
+
+
 @app.get("/")
 async def index():
     return FileResponse("/app/static/index.html")
