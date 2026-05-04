@@ -16,7 +16,10 @@ from mic_satellite import AudioQueue, run_satellite_loop, pump_rtsp_to_queue
 from wyoming_tts import synthesize_to_pcm
 
 log = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
+logging.getLogger("aioice").setLevel(logging.WARNING)
+logging.getLogger("aiortc").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # ─── config ────────────────────────────────────────────────────────────────
 

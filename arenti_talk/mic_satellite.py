@@ -133,11 +133,18 @@ async def _run_one_pipeline(
     while handler_id is None:
         raw = await asyncio.wait_for(ws.recv(), timeout=15)
         evt = json.loads(raw)
+        log.debug("Pipeline %d recv: %s", msg_id, raw[:200])
         if evt.get("id") != msg_id:
+            continue
+        if evt.get("type") == "result":
+            if not evt.get("success"):
+                raise RuntimeError(f"Pipeline rejected: {evt.get('error')}")
+            # result ok, continue waiting for events
             continue
         if evt.get("type") == "event":
             e = evt.get("event", {})
             etype = e.get("type")
+            log.info("Pipeline %d init-event: %s", msg_id, etype)
             if etype == "run-start":
                 handler_id = e["data"]["stt_binary_handler_id"]
                 log.info("Pipeline %d handler_id=%d", msg_id, handler_id)
