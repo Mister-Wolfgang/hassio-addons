@@ -1,10 +1,9 @@
-"""Mic satellite — streams camera audio to HA Assist pipeline, returns TTS URL."""
+"""Mic satellite — streams camera audio to HA Assist pipeline in a permanent loop."""
 import asyncio
 import json
 import logging
 import os
-import subprocess
-from typing import AsyncIterator, Callable, Awaitable
+from typing import Callable, Awaitable, AsyncIterator
 
 import numpy as np
 import websockets
@@ -19,13 +18,15 @@ SOURCE_RATE   = 8000
 CHUNK_SAMPLES = 1600    # 100 ms at 16 kHz
 
 
+# ─── AudioQueue ──────────────────────────────────────────────────────────────
+
 class AudioQueue:
-    """Async queue of raw bytes (PCMU 8kHz from camera RTP or s16le 16kHz from RTSP)."""
+    """Async queue of raw bytes (PCMU 8kHz from RTP or s16le at source_rate)."""
 
     def __init__(self, maxsize: int = 400):
         self._q: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=maxsize)
         self.source_rate: int = SOURCE_RATE
-        self.is_pcmu: bool = True   # False = already s16le at source_rate
+        self.is_pcmu: bool = True
 
     def put_nowait(self, data: bytes | None) -> None:
         try:
@@ -40,7 +41,7 @@ class AudioQueue:
         self._q.put_nowait(None)
 
 
-# ─── audio conversion ────────────────────────────────────────────────────────
+# ─── audio conversion ─────────────────────────────────────────────────────────
 
 def _pcmu_to_s16(pcmu: bytes) -> bytes:
     samples = np.frombuffer(pcmu, dtype=np.uint8).astype(np.int32)
@@ -57,42 +58,21 @@ def _resample(pcm: bytes, from_rate: int, to_rate: int) -> bytes:
     if from_rate == to_rate:
         return pcm
     arr = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
-    ratio = to_rate / from_rate
-    n_out = int(len(arr) * ratio)
+    n_out = int(len(arr) * to_rate / from_rate)
     indices = np.linspace(0, len(arr) - 1, n_out)
-    resampled = np.interp(indices, np.arange(len(arr)), arr)
-    return resampled.astype(np.int16).tobytes()
+    return np.interp(indices, np.arange(len(arr)), arr).astype(np.int16).tobytes()
 
 
-async def _audio_chunks(queue: AudioQueue) -> AsyncIterator[bytes]:
-    chunk_bytes = CHUNK_SAMPLES * 2
-    buf = bytearray()
-    while True:
-        data = await queue.get()
-        if data is None:
-            break
-        pcm = _pcmu_to_s16(data) if queue.is_pcmu else data
-        pcm16k = _resample(pcm, queue.source_rate, TARGET_RATE)
-        buf.extend(pcm16k)
-        while len(buf) >= chunk_bytes:
-            yield bytes(buf[:chunk_bytes])
-            buf = buf[chunk_bytes:]
-
-
-# ─── RTSP audio source ───────────────────────────────────────────────────────
+# ─── RTSP source ─────────────────────────────────────────────────────────────
 
 async def pump_rtsp_to_queue(rtsp_url: str, queue: AudioQueue) -> None:
-    """Read RTSP audio via ffmpeg subprocess → push s16le 16kHz chunks to queue."""
     queue.is_pcmu = False
     queue.source_rate = TARGET_RATE
     cmd = [
         "ffmpeg", "-loglevel", "quiet",
-        "-i", rtsp_url,
-        "-vn",
-        "-ar", str(TARGET_RATE),
-        "-ac", "1",
-        "-f", "s16le",
-        "pipe:1",
+        "-i", rtsp_url, "-vn",
+        "-ar", str(TARGET_RATE), "-ac", "1",
+        "-f", "s16le", "pipe:1",
     ]
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -111,77 +91,164 @@ async def pump_rtsp_to_queue(rtsp_url: str, queue: AudioQueue) -> None:
         queue.stop()
 
 
-# ─── HA Assist pipeline ──────────────────────────────────────────────────────
+# ─── HA WebSocket auth ────────────────────────────────────────────────────────
+
+async def _ha_auth(ws) -> None:
+    await ws.recv()
+    await ws.send(json.dumps({"type": "auth", "access_token": HA_TOKEN}))
+    resp = json.loads(await ws.recv())
+    if resp.get("type") != "auth_ok":
+        raise RuntimeError(f"HA auth failed: {resp}")
+
+
+# ─── single pipeline run ──────────────────────────────────────────────────────
+
+async def _run_one_pipeline(
+    ws,
+    msg_id: int,
+    queue: AudioQueue,
+    pipeline_id: str | None,
+    on_tts_url: Callable[[str], Awaitable[None]] | None,
+    stop_event: asyncio.Event,
+) -> None:
+    """Run one STT→TTS pipeline pass, streaming from queue until VAD end or stop."""
+
+    cmd: dict = {
+        "id": msg_id,
+        "type": "assist_pipeline/run",
+        "start_stage": "stt",
+        "end_stage": "tts",
+        "input": {"sample_rate": TARGET_RATE},
+    }
+    if pipeline_id:
+        cmd["pipeline_id"] = pipeline_id
+    await ws.send(json.dumps(cmd))
+
+    # Wait for run-start
+    handler_id: int | None = None
+    while handler_id is None:
+        raw = await asyncio.wait_for(ws.recv(), timeout=10)
+        evt = json.loads(raw)
+        if evt.get("type") == "event" and evt.get("event", {}).get("type") == "run-start":
+            handler_id = evt["event"]["data"]["stt_binary_handler_id"]
+            log.info("Pipeline %d started handler_id=%d", msg_id, handler_id)
+
+    prefix = bytes([handler_id])
+    chunk_bytes = CHUNK_SAMPLES * 2
+    buf = bytearray()
+
+    # Stream audio until stop_event or queue empty
+    async def _stream():
+        nonlocal buf
+        while not stop_event.is_set():
+            try:
+                data = await asyncio.wait_for(queue.get(), timeout=0.5)
+            except asyncio.TimeoutError:
+                continue
+            if data is None:
+                break
+            pcm = _pcmu_to_s16(data) if queue.is_pcmu else data
+            pcm16k = _resample(pcm, queue.source_rate, TARGET_RATE)
+            buf.extend(pcm16k)
+            while len(buf) >= chunk_bytes:
+                await ws.send(prefix + bytes(buf[:chunk_bytes]))
+                buf = buf[chunk_bytes:]
+        await ws.send(prefix)  # end of audio
+
+    stream_task = asyncio.ensure_future(_stream())
+
+    # Collect events
+    tts_url: str | None = None
+    try:
+        while True:
+            raw = await asyncio.wait_for(ws.recv(), timeout=20)
+            evt = json.loads(raw)
+            if evt.get("id") != msg_id:
+                continue
+            if evt.get("type") != "event":
+                continue
+            e = evt.get("event", {})
+            etype = e.get("type", "")
+            log.info("[pipeline %d] event: %s", msg_id, etype)
+
+            if etype == "stt-end":
+                stream_task.cancel()
+
+            if etype == "tts-start":
+                tts_url = (e.get("data", {}).get("tts_output") or {}).get("url")
+
+            elif etype == "error":
+                log.error("[pipeline %d] error: %s", msg_id, e.get("data"))
+                break
+
+            elif etype == "run-end":
+                break
+    finally:
+        stream_task.cancel()
+
+    if tts_url and on_tts_url:
+        await on_tts_url(tts_url)
+
+
+# ─── permanent satellite loop ─────────────────────────────────────────────────
+
+async def run_satellite_loop(
+    queue: AudioQueue,
+    camera_name: str,
+    pipeline_id: str | None = None,
+    on_tts_url: Callable[[str], Awaitable[None]] | None = None,
+    stop_event: asyncio.Event | None = None,
+) -> None:
+    """Permanent loop: reconnects to HA WS and runs pipelines until stop_event set."""
+    if stop_event is None:
+        stop_event = asyncio.Event()
+
+    msg_id = 1
+    retry_delay = 2.0
+
+    while not stop_event.is_set():
+        try:
+            async with websockets.connect(HA_WS_URL) as ws:
+                await _ha_auth(ws)
+                log.info("[%s] HA WebSocket connected", camera_name)
+                retry_delay = 2.0
+
+                while not stop_event.is_set():
+                    try:
+                        await _run_one_pipeline(
+                            ws, msg_id, queue, pipeline_id, on_tts_url, stop_event
+                        )
+                        msg_id += 1
+                        # Small pause between pipeline runs
+                        await asyncio.sleep(0.5)
+                    except asyncio.TimeoutError:
+                        log.warning("[%s] Pipeline timeout, restarting", camera_name)
+                        msg_id += 1
+                    except Exception as e:
+                        log.error("[%s] Pipeline error: %s", camera_name, e)
+                        msg_id += 1
+                        await asyncio.sleep(1.0)
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            if not stop_event.is_set():
+                log.error("[%s] WS disconnected: %s — retry in %.0fs", camera_name, e, retry_delay)
+                await asyncio.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 30.0)
+
+    log.info("[%s] Satellite loop stopped", camera_name)
+
+
+# ─── legacy one-shot (kept for compatibility) ─────────────────────────────────
 
 async def run_satellite(
     queue: AudioQueue,
     pipeline_id: str | None = None,
     on_tts_url: Callable[[str], Awaitable[None]] | None = None,
 ) -> None:
-    """Connect to HA WebSocket, stream audio, call on_tts_url with TTS audio URL."""
+    stop = asyncio.Event()
+    stop.set()  # one-shot: stream until queue empty
     async with websockets.connect(HA_WS_URL) as ws:
-        # Auth
-        await ws.recv()
-        await ws.send(json.dumps({"type": "auth", "access_token": HA_TOKEN}))
-        resp = await ws.recv()
-        if '"auth_ok"' not in resp:
-            raise RuntimeError(f"HA auth failed: {resp}")
-        log.info("HA WebSocket authenticated")
-
-        # Start pipeline
-        cmd: dict = {
-            "id": 1,
-            "type": "assist_pipeline/run",
-            "start_stage": "stt",
-            "end_stage": "tts",
-            "input": {"sample_rate": TARGET_RATE},
-        }
-        if pipeline_id:
-            cmd["pipeline_id"] = pipeline_id
-        await ws.send(json.dumps(cmd))
-
-        # Get stt_binary_handler_id from run-start event
-        handler_id: int | None = None
-        while handler_id is None:
-            raw = await asyncio.wait_for(ws.recv(), timeout=10)
-            evt = json.loads(raw)
-            if evt.get("type") == "event":
-                e = evt.get("event", {})
-                if e.get("type") == "run-start":
-                    handler_id = e["data"]["stt_binary_handler_id"]
-                    log.info("Pipeline started handler_id=%d", handler_id)
-
-        prefix = bytes([handler_id])
-
-        # Stream audio to pipeline
-        async for chunk in _audio_chunks(queue):
-            await ws.send(prefix + chunk)
-        await ws.send(prefix)  # end of audio signal
-        log.info("Audio stream ended")
-
-        # Collect pipeline events until run-end
-        tts_url: str | None = None
-        while True:
-            try:
-                raw = await asyncio.wait_for(ws.recv(), timeout=15)
-            except asyncio.TimeoutError:
-                log.warning("Pipeline response timeout")
-                break
-            evt = json.loads(raw)
-            if evt.get("type") != "event":
-                continue
-            e = evt.get("event", {})
-            etype = e.get("type", "")
-            log.info("Pipeline event: %s", etype)
-
-            if etype == "tts-start":
-                tts_url = e.get("data", {}).get("tts_output", {}).get("url")
-                log.info("TTS URL: %s", tts_url)
-            elif etype == "error":
-                log.error("Pipeline error: %s", e.get("data"))
-                break
-            elif etype == "run-end":
-                break
-
-        if tts_url and on_tts_url:
-            await on_tts_url(tts_url)
+        await _ha_auth(ws)
+        await _run_one_pipeline(ws, 1, queue, pipeline_id, on_tts_url, stop)

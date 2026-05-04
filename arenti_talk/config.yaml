@@ -35,6 +35,7 @@ options:
   wyoming_tts_uri: ""
   tts_voice: ""
   tts_language: "fr"
+  listen_enabled: true
   camera_overrides: []
 
 schema:
@@ -44,9 +45,11 @@ schema:
   wyoming_tts_uri: "str?"
   tts_voice: "str?"
   tts_language: "str?"
+  listen_enabled: bool
   camera_overrides:
     - name: str
       audio_source: "str?"
       pipeline_id: "str?"
+      listen_enabled: "bool?"
 
 watchdog: "http://[HOST]:[PORT:8080]/health"

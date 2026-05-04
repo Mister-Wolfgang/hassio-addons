@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from auth import ArentiSession
 from mts import MTSSession
 from webrtc_talk import talk_file, talk_tts, talk_with_track, talk_pcm, _AudioFileTrack
-from mic_satellite import AudioQueue, run_satellite, pump_rtsp_to_queue
+from mic_satellite import AudioQueue, run_satellite_loop, pump_rtsp_to_queue
 from wyoming_tts import synthesize_to_pcm
 
 log = logging.getLogger(__name__)
@@ -31,6 +31,7 @@ if os.path.exists(_OPTIONS_PATH):
     WYOMING_TTS_URI = _opts.get("wyoming_tts_uri", "")
     TTS_VOICE       = _opts.get("tts_voice", "")
     TTS_LANGUAGE    = _opts.get("tts_language", "fr")
+    LISTEN_ENABLED  = bool(_opts.get("listen_enabled", True))
 else:
     USERNAME        = os.environ["ARENTI_USER"]
     PASSWORD        = os.environ["ARENTI_PASS"]
@@ -38,6 +39,7 @@ else:
     WYOMING_TTS_URI = os.environ.get("WYOMING_TTS_URI", "")
     TTS_VOICE       = os.environ.get("TTS_VOICE", "")
     TTS_LANGUAGE    = os.environ.get("TTS_LANGUAGE", "fr")
+    LISTEN_ENABLED  = os.environ.get("LISTEN_ENABLED", "true").lower() == "true"
 
 CAMERAS: dict[str, dict] = {}
 
@@ -83,11 +85,12 @@ async def _discover_cameras() -> None:
             name = f"{name}_{sn[-4:]}"
         ov = overrides.get(name, {})
         CAMERAS[name] = {
-            "device_id":    str(dev.get("deviceID", dev.get("deviceId", dev.get("deviceid", "")))),
-            "host_key":     dev.get("hostKey", ""),
-            "sn_num":       sn,
-            "audio_source": ov.get("audio_source", "arenti"),
-            "pipeline_id":  ov.get("pipeline_id", None),
+            "device_id":      str(dev.get("deviceID", dev.get("deviceId", dev.get("deviceid", "")))),
+            "host_key":       dev.get("hostKey", ""),
+            "sn_num":         sn,
+            "audio_source":   ov.get("audio_source", "arenti"),
+            "pipeline_id":    ov.get("pipeline_id", None),
+            "listen_enabled": bool(ov.get("listen_enabled", True)),
         }
     log.info("Discovered %d camera(s): %s", len(CAMERAS), list(CAMERAS))
 
@@ -152,10 +155,17 @@ async def _play_url_on_camera(cam: dict, url: str) -> None:
 # ─── listen session ──────────────────────────────────────────────────────────
 
 async def _listen_session(cam: dict, camera_name: str) -> None:
-    """Open a WebRTC session (or RTSP), stream mic to HA, play TTS response."""
-    queue = AudioQueue()
-    pipeline_id = cam.get("pipeline_id")
+    """Permanent mic satellite: WebRTC → HA Assist pipeline loop."""
+    if not LISTEN_ENABLED:
+        log.info("[%s] Listen disabled globally", camera_name)
+        return
+    if not cam.get("listen_enabled", True):
+        log.info("[%s] Listen disabled for this camera", camera_name)
+        return
+
+    pipeline_id  = cam.get("pipeline_id")
     audio_source = cam.get("audio_source", "arenti")
+    stop_event   = asyncio.Event()
 
     async def on_tts_url(url: str) -> None:
         log.info("[%s] TTS response: %s", camera_name, url)
@@ -164,28 +174,48 @@ async def _listen_session(cam: dict, camera_name: str) -> None:
         except Exception as e:
             log.error("[%s] Failed to play TTS: %s", camera_name, e)
 
-    if audio_source == "arenti":
-        # Open WebRTC session — silence track keeps connection alive while mic is captured
-        silence_track = _AudioFileTrack(frames=[])
-        mts = await _mts_for(cam)
-        webrtc_task = asyncio.ensure_future(
-            talk_with_track(mts, silence_track, duration=3600.0, audio_queue=queue)
-        )
-        try:
-            await run_satellite(queue, pipeline_id=pipeline_id, on_tts_url=on_tts_url)
-        finally:
-            webrtc_task.cancel()
-    else:
-        # RTSP or custom source
-        rtsp_url = audio_source if audio_source.startswith("rtsp") else audio_source
-        rtsp_task = asyncio.ensure_future(pump_rtsp_to_queue(rtsp_url, queue))
-        try:
-            await run_satellite(queue, pipeline_id=pipeline_id, on_tts_url=on_tts_url)
-        finally:
-            rtsp_task.cancel()
-
-    _listen_tasks.pop(camera_name, None)
-    log.info("[%s] Listen session ended", camera_name)
+    try:
+        if audio_source == "arenti":
+            while not stop_event.is_set():
+                queue = AudioQueue()
+                silence_track = _AudioFileTrack(frames=[])
+                try:
+                    mts = await _mts_for(cam)
+                except Exception as e:
+                    log.error("[%s] MTS connect failed: %s — retry in 10s", camera_name, e)
+                    await asyncio.sleep(10)
+                    continue
+                webrtc_task = asyncio.ensure_future(
+                    talk_with_track(mts, silence_track, duration=3600.0, audio_queue=queue)
+                )
+                sat_task = asyncio.ensure_future(
+                    run_satellite_loop(queue, camera_name,
+                                       pipeline_id=pipeline_id,
+                                       on_tts_url=on_tts_url,
+                                       stop_event=stop_event)
+                )
+                try:
+                    await asyncio.gather(webrtc_task, sat_task)
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    log.error("[%s] Session error: %s — restarting in 5s", camera_name, e)
+                    webrtc_task.cancel()
+                    sat_task.cancel()
+                    await asyncio.sleep(5)
+        else:
+            queue = AudioQueue()
+            rtsp_task = asyncio.ensure_future(pump_rtsp_to_queue(audio_source, queue))
+            try:
+                await run_satellite_loop(queue, camera_name,
+                                          pipeline_id=pipeline_id,
+                                          on_tts_url=on_tts_url,
+                                          stop_event=stop_event)
+            finally:
+                rtsp_task.cancel()
+    finally:
+        _listen_tasks.pop(camera_name, None)
+        log.info("[%s] Listen session ended", camera_name)
 
 
 # ─── endpoints ─────────────────────────────────────────────────────────────
@@ -261,8 +291,12 @@ async def talk_text(camera: str, req: TTSRequest, background_tasks: BackgroundTa
 
 @app.post("/listen/{camera}")
 async def start_listen(camera: str):
-    """Start mic satellite session: camera mic → HA Assist pipeline → speaker."""
+    """Start permanent mic satellite session."""
     cam = _get_camera(camera)
+    if not LISTEN_ENABLED:
+        raise HTTPException(403, "Listen disabled globally")
+    if not cam.get("listen_enabled", True):
+        raise HTTPException(403, f"Listen disabled for camera '{camera}'")
     if camera in _listen_tasks and not _listen_tasks[camera].done():
         return {"status": "already_listening", "camera": camera}
     task = asyncio.ensure_future(_listen_session(cam, camera))
