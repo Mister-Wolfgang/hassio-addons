@@ -7,6 +7,8 @@ import tempfile
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from auth import ArentiSession
@@ -109,6 +111,12 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="2way Audio Arenti", lifespan=lifespan)
+
+@app.get("/")
+async def index():
+    return FileResponse("/app/static/index.html")
+
+app.mount("/static", StaticFiles(directory="/app/static"), name="static")
 
 
 # ─── helpers ────────────────────────────────────────────────────────────────

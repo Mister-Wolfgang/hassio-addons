@@ -9,3 +9,4 @@ gTTS==2.5.4
 numpy==2.2.5
 pydantic==2.11.4
 python-multipart==0.0.20
+aiofiles==24.1.0

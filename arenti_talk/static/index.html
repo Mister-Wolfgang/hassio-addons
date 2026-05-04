@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Arenti Talk</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, sans-serif; background: #111; color: #eee; padding: 1rem; }
+  h1 { font-size: 1.2rem; margin-bottom: 1rem; color: #7eb8f7; }
+  .card { background: #1e1e1e; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
+  h2 { font-size: 0.9rem; color: #888; margin-bottom: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; }
+  select, input, textarea { width: 100%; padding: 0.5rem; background: #2a2a2a; border: 1px solid #333; border-radius: 4px; color: #eee; font-size: 0.9rem; margin-bottom: 0.5rem; }
+  button { padding: 0.5rem 1rem; border: none; border-radius: 4px; cursor: pointer; font-size: 0.85rem; font-weight: 600; }
+  .btn-primary { background: #7eb8f7; color: #111; }
+  .btn-danger  { background: #f77e7e; color: #111; }
+  .btn-success { background: #7ef7a0; color: #111; }
+  .btn-sm { padding: 0.3rem 0.7rem; font-size: 0.8rem; }
+  .row { display: flex; gap: 0.5rem; align-items: center; }
+  .row select { margin-bottom: 0; }
+  #cameras { display: grid; gap: 0.5rem; }
+  .cam-row { display: flex; align-items: center; justify-content: space-between; background: #2a2a2a; border-radius: 6px; padding: 0.6rem 0.8rem; }
+  .cam-name { font-size: 0.9rem; }
+  .cam-status { font-size: 0.75rem; padding: 0.2rem 0.5rem; border-radius: 10px; margin-right: 0.5rem; }
+  .status-listening { background: #1a4a2a; color: #7ef7a0; }
+  .status-idle      { background: #2a2a2a; color: #888; border: 1px solid #333; }
+  .actions { display: flex; gap: 0.4rem; }
+  #log { background: #0a0a0a; border-radius: 4px; padding: 0.5rem; font-family: monospace; font-size: 0.75rem; height: 120px; overflow-y: auto; color: #aaa; }
+  .log-ok  { color: #7ef7a0; }
+  .log-err { color: #f77e7e; }
+  .log-info{ color: #7eb8f7; }
+</style>
+</head>
+<body>
+<h1>Arenti Talk</h1>
+
+<div class="card">
+  <h2>Caméras</h2>
+  <div id="cameras"><em style="color:#555">Chargement...</em></div>
+</div>
+
+<div class="card">
+  <h2>TTS — Parler sur une caméra</h2>
+  <div class="row" style="margin-bottom:0.5rem">
+    <select id="tts-cam" style="margin-bottom:0"></select>
+  </div>
+  <textarea id="tts-text" rows="2" placeholder="Texte à lire..."></textarea>
+  <button class="btn-primary" onclick="sendTTS()">Envoyer</button>
+</div>
+
+<div class="card">
+  <h2>Log</h2>
+  <div id="log"></div>
+</div>
+
+<script>
+const base = window.location.pathname.replace(/\/$/, '');
+
+function log(msg, cls='') {
+  const el = document.getElementById('log');
+  const line = document.createElement('div');
+  line.className = cls;
+  line.textContent = new Date().toLocaleTimeString() + ' ' + msg;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+}
+
+async function api(method, path, body) {
+  const opts = { method, headers: {} };
+  if (body) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+  const r = await fetch(base + path, opts);
+  return r.ok ? r.json() : Promise.reject(await r.text());
+}
+
+let listenState = {};
+
+async function loadCameras() {
+  try {
+    const [cams, listening] = await Promise.all([api('GET','/cameras'), api('GET','/listen')]);
+    listenState = listening;
+    const camSel = document.getElementById('tts-cam');
+    camSel.innerHTML = '';
+    const container = document.getElementById('cameras');
+    container.innerHTML = '';
+    for (const [name, info] of Object.entries(cams)) {
+      const isListening = listening[name] === 'listening';
+      const row = document.createElement('div');
+      row.className = 'cam-row';
+      row.innerHTML = `
+        <span class="cam-name">${name}</span>
+        <div class="actions">
+          <span class="cam-status ${isListening ? 'status-listening' : 'status-idle'}" id="status-${name}">
+            ${isListening ? 'écoute' : 'inactif'}
+          </span>
+          ${isListening
+            ? `<button class="btn-danger btn-sm" onclick="stopListen('${name}')">Arrêter</button>`
+            : `<button class="btn-success btn-sm" onclick="startListen('${name}')">Écouter</button>`
+          }
+          <button class="btn-primary btn-sm" onclick="quickTTS('${name}')">TTS</button>
+        </div>`;
+      container.appendChild(row);
+      const opt = document.createElement('option');
+      opt.value = name; opt.textContent = name;
+      camSel.appendChild(opt);
+    }
+  } catch(e) { log('Erreur chargement: ' + e, 'log-err'); }
+}
+
+async function startListen(cam) {
+  try {
+    const r = await api('POST', '/listen/' + cam);
+    log('Satellite démarré: ' + cam, 'log-ok');
+    loadCameras();
+  } catch(e) { log('Erreur: ' + e, 'log-err'); }
+}
+
+async function stopListen(cam) {
+  try {
+    await api('DELETE', '/listen/' + cam);
+    log('Satellite arrêté: ' + cam, 'log-info');
+    loadCameras();
+  } catch(e) { log('Erreur: ' + e, 'log-err'); }
+}
+
+async function sendTTS() {
+  const cam = document.getElementById('tts-cam').value;
+  const text = document.getElementById('tts-text').value.trim();
+  if (!text) return;
+  try {
+    await api('POST', '/tts/' + cam, {text, lang: 'fr'});
+    log('TTS envoyé sur ' + cam + ': ' + text, 'log-ok');
+  } catch(e) { log('Erreur TTS: ' + e, 'log-err'); }
+}
+
+function quickTTS(cam) {
+  document.getElementById('tts-cam').value = cam;
+  document.getElementById('tts-text').focus();
+}
+
+loadCameras();
+setInterval(loadCameras, 5000);
+</script>
+</body>
+</html>
