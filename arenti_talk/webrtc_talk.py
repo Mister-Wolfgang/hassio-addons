@@ -432,11 +432,21 @@ async def talk_with_track(
 
     async def ws_pump():
         echoed_sids: set = set()
+        last_keepalive = asyncio.get_event_loop().time()
         try:
             while True:
                 try:
                     raw = await asyncio.wait_for(mts._ws.recv(), timeout=5)
                 except asyncio.TimeoutError:
+                    # Send keepalive ping every 20s to prevent camera from closing session
+                    now = asyncio.get_event_loop().time()
+                    if now - last_keepalive >= 20:
+                        try:
+                            await mts._ws.ping()
+                            last_keepalive = now
+                            log.debug("ws_pump keepalive ping sent")
+                        except Exception as e:
+                            log.debug("ws_pump keepalive failed: %s", e)
                     continue
                 data = json.loads(raw)
                 log.info("ws_pump msg: %s", json.dumps(data))
@@ -521,10 +531,24 @@ async def talk_with_track(
 
     asyncio.ensure_future(send_local_audio_activate())
 
-    # Wait for track to finish (pre-loaded: duration+2s; streaming: until finish() called)
+    pc_closed = asyncio.Event()
+
+    @pc.on("connectionstatechange")
+    async def on_state3():
+        if pc.connectionState in ("failed", "closed", "disconnected"):
+            pc_closed.set()
+
+    # Wait for track to finish (pre-loaded: duration+2s; streaming: until finish() or PC closed)
     if track._streaming:
-        await track._done_event.wait()
-        await asyncio.sleep(0.5)  # drain last frames
+        done, _ = await asyncio.wait(
+            [asyncio.ensure_future(track._done_event.wait()),
+             asyncio.ensure_future(pc_closed.wait())],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if pc_closed.is_set() and not track._done_event.is_set():
+            log.warning("Camera closed WebRTC before stream ended — %d frames sent", track._audio_count)
+        else:
+            await asyncio.sleep(0.5)
     else:
         await asyncio.sleep(duration + 2.0)
     log.info("Audio done — %d audio frames sent", track._audio_count)
