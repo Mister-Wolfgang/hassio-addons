@@ -146,8 +146,9 @@ async def _run_one_pipeline(
             etype = e.get("type")
             log.info("Pipeline %d init-event: %s", msg_id, etype)
             if etype == "run-start":
-                handler_id = e["data"]["stt_binary_handler_id"]
-                log.info("Pipeline %d handler_id=%d", msg_id, handler_id)
+                d = e.get("data", {})
+                handler_id = d.get("stt_binary_handler_id") or d.get("runner_data", {}).get("stt_binary_handler_id")
+                log.info("Pipeline %d handler_id=%s data_keys=%s", msg_id, handler_id, list(d.keys()))
             elif etype == "error":
                 raise RuntimeError(f"Pipeline start error: {e.get('data')}")
 
