@@ -1,0 +1,25 @@
+ARG BUILD_FROM=ghcr.io/home-assistant/amd64-base-python:3.12
+FROM ${BUILD_FROM}
+
+RUN apk add --no-cache \
+    ffmpeg \
+    libffi-dev \
+    openssl-dev \
+    opus-dev \
+    libvpx-dev \
+    libsrtp-dev
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+COPY run.sh /run.sh
+RUN chmod +x /run.sh
+
+CMD ["/run.sh"]
+
+LABEL \
+    io.hass.version="1.0.0" \
+    io.hass.type="addon" \
+    io.hass.arch="aarch64|amd64|armv7"

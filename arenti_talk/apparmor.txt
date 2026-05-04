@@ -1,0 +1,25 @@
+#include <tunables/global>
+
+profile arenti_talk flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/base>
+
+  network inet tcp,
+  network inet udp,
+  network inet6 tcp,
+  network inet6 udp,
+
+  file,
+  signal (send) set=(kill,term,int,hup,cont),
+
+  deny /etc/passwd mrwklx,
+  deny /etc/shadow mrwklx,
+  deny @{PROC}/** w,
+  deny @{PROC}/{[^1],[^1][^0-9]*}/mem mrw,
+  deny @{PROC}/[^1]/fd/** mrw,
+  deny @{PROC}/[^1]/task/*/fd/** mrw,
+
+  /usr/bin/ffmpeg rix,
+  /tmp/** rw,
+  /data/** rw,
+  /media/** rw,
+}

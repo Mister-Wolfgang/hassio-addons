@@ -1,0 +1,47 @@
+name: "2way Audio Arenti"
+version: "1.0.0"
+slug: "2way_audio_arenti"
+description: "Haut-parleur et micro satellite HA pour caméras Arenti/Meari"
+arch:
+  - aarch64
+  - amd64
+  - armv7
+
+startup: application
+boot: auto
+init: false
+
+homeassistant_api: true
+hassio_api: true
+auth_api: true
+
+ports:
+  "8080/tcp": 8080
+ports_description:
+  "8080/tcp": "API REST Arenti Talk"
+
+ingress: true
+ingress_port: 8080
+ingress_entry: /
+panel_icon: mdi:camera-party-mode
+panel_title: "Arenti Talk"
+
+map:
+  - media:rw
+
+options:
+  arenti_email: ""
+  arenti_password: ""
+  volume: 0.2
+  camera_overrides: []
+
+schema:
+  arenti_email: email
+  arenti_password: password
+  volume: "float(0.0,1.0)"
+  camera_overrides:
+    - name: str
+      audio_source: "str?"
+      pipeline_id: "str?"
+
+watchdog: "http://[HOST]:[PORT:8080]/health"
