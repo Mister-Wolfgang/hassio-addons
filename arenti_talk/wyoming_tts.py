@@ -19,24 +19,34 @@ async def _parse_uri(uri: str) -> tuple[str, int]:
 
 
 async def _read_event(reader: asyncio.StreamReader) -> dict:
-    """Read one Wyoming event: JSON line + optional payload."""
+    """Read one Wyoming event: JSON header line + optional data + optional payload."""
     line = await reader.readline()
     if not line:
         raise EOFError("Wyoming connection closed")
-    event = json.loads(line.decode())
-    payload_len = event.get("payload_length", 0)
+    header = json.loads(line.decode())
+    # Read extra JSON data block if present
+    data_len = header.get("data_length", 0)
+    if data_len:
+        data_bytes = await reader.readexactly(data_len)
+        header["data"] = json.loads(data_bytes.decode())
+    # Read binary payload if present
+    payload_len = header.get("payload_length", 0)
     if payload_len:
-        event["_payload"] = await reader.readexactly(payload_len)
-    return event
+        header["_payload"] = await reader.readexactly(payload_len)
+    return header
 
 
 async def _write_event(writer: asyncio.StreamWriter, type_: str, data: dict | None = None) -> None:
-    """Write one Wyoming event."""
-    msg: dict = {"type": type_}
+    """Write one Wyoming event with proper data_length encoding."""
+    header: dict = {"type": type_}
     if data:
-        msg["data"] = data
-    line = json.dumps(msg) + "\n"
-    writer.write(line.encode())
+        data_bytes = json.dumps(data).encode()
+        header["data_length"] = len(data_bytes)
+        line = json.dumps(header) + "\n"
+        writer.write(line.encode() + data_bytes)
+    else:
+        line = json.dumps(header) + "\n"
+        writer.write(line.encode())
     await writer.drain()
 
 
