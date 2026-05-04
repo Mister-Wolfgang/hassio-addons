@@ -54,7 +54,7 @@
 </div>
 
 <script>
-const base = '';
+const base = window.location.pathname.replace(/\/$/, '');
 
 function log(msg, cls='') {
   const el = document.getElementById('log');
