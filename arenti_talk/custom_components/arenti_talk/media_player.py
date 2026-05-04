@@ -1,6 +1,7 @@
 """Arenti Talk media_player platform."""
 from __future__ import annotations
 import logging
+import aiohttp
 
 from homeassistant.components.media_player import (
     MediaPlayerEntity,
@@ -63,10 +64,10 @@ class ArentiMediaPlayer(MediaPlayerEntity):
                     data = await resp.read()
                     ct = resp.headers.get("Content-Type", "audio/mpeg")
                 suffix = ".mp3" if "mp3" in ct else ".wav"
-                form = {"file": (f"audio{suffix}", data, ct)}
+                form = aiohttp.FormData()
+                form.add_field("file", data, filename=f"audio{suffix}", content_type=ct)
                 async with session.post(
-                    f"{self._api_url}/talk/{self._camera_name}",
-                    data={"file": data},
+                    f"{self._api_url}/talk/{self._camera_name}", data=form
                 ) as r:
                     pass
             else:
