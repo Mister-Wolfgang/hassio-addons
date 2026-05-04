@@ -7,9 +7,9 @@ import shutil
 import tempfile
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks, Request
+from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from auth import ArentiSession
@@ -134,12 +134,8 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="2way Audio Arenti", lifespan=lifespan)
 
 @app.get("/")
-async def index(request: Request):
-    ingress_path = request.headers.get("X-Ingress-Path", "").rstrip("/")
-    with open("/app/static/index.html") as f:
-        html = f.read()
-    html = html.replace("__INGRESS_PATH__", ingress_path)
-    return HTMLResponse(html)
+async def index():
+    return FileResponse("/app/static/index.html")
 
 app.mount("/static", StaticFiles(directory="/app/static"), name="static")
 
