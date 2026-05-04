@@ -345,7 +345,7 @@ async def play_url(camera: str, req: PlayURLRequest, background_tasks: Backgroun
             """Stream URL → ffmpeg → s16le 8kHz → push frames to track."""
             token = os.environ.get("SUPERVISOR_TOKEN", "")
             cmd = [
-                "ffmpeg", "-loglevel", "quiet",
+                "ffmpeg", "-loglevel", "warning",
                 "-headers", f"Authorization: Bearer {token}\r\n",
                 "-i", req.url,
                 "-vn", "-ar", "8000", "-ac", "1", "-f", "s16le", "pipe:1",
@@ -353,8 +353,12 @@ async def play_url(camera: str, req: PlayURLRequest, background_tasks: Backgroun
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
             )
+            async def _log_stderr():
+                async for line in proc.stderr:
+                    log.warning("[%s] ffmpeg: %s", camera, line.decode().rstrip())
+            asyncio.ensure_future(_log_stderr())
             buf = bytearray()
             try:
                 while True:
