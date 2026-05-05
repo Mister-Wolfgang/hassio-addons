@@ -1,6 +1,6 @@
 name: "2way Audio Arenti"
 
-version: "1.0.27"
+version: "1.0.28"
 
 slug: "2way_audio_arenti"
 description: "Haut-parleur et micro satellite HA pour caméras Arenti/Meari"
