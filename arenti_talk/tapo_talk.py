@@ -1,7 +1,8 @@
-"""Tapo camera talkback and audio capture via pytapo."""
+"""Tapo camera talkback via ONVIF RTSP backchannel (ffmpeg) and mic via RTSP."""
 import asyncio
 import logging
-import concurrent.futures
+import tempfile
+import os
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -9,47 +10,42 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="tapo")
-
-
-def _run_in_new_loop(coro):
-    """Run an async coroutine in a fresh event loop (for pytapo which calls asyncio.run internally)."""
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
-
 
 async def tapo_talk_pcm(host: str, password: str, pcm_8k: bytes, volume: float = 1.0) -> None:
-    """Send raw PCM s16le 8kHz to Tapo camera speaker."""
+    """Send raw PCM s16le 8kHz to Tapo speaker via RTSP backchannel."""
     import numpy as np
 
     if volume != 1.0:
         arr = np.frombuffer(pcm_8k, dtype="<i2").astype("float32") * volume
         pcm_8k = arr.clip(-32768, 32767).astype("<i2").tobytes()
 
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(_executor, _send_audio_sync, host, password, pcm_8k)
+    url = f"rtsp://admin:{password}@{host}/backchannel"
+    duration = len(pcm_8k) / (8000 * 2)  # seconds
 
-
-def _send_audio_sync(host: str, password: str, pcm_s16le_8k: bytes) -> None:
-    """Blocking in its own thread+loop: authenticate and stream PCM to Tapo."""
-    from pytapo import Tapo
-
-    async def _inner():
-        tapo = Tapo(host, "admin", password)
-        await tapo.startAudioOutput()
-        chunk_size = 3200  # 200ms @ 8kHz s16le
-        for i in range(0, len(pcm_s16le_8k), chunk_size):
-            await tapo.transmitAudio(pcm_s16le_8k[i:i + chunk_size])
-        await tapo.stopAudioOutput()
-
-    _run_in_new_loop(_inner())
+    cmd = [
+        "ffmpeg", "-loglevel", "warning",
+        "-f", "s16le", "-ar", "8000", "-ac", "1",
+        "-i", "pipe:0",
+        "-c:a", "pcm_mulaw", "-ar", "8000", "-ac", "1",
+        "-f", "rtsp", "-rtsp_transport", "tcp",
+        url,
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdin=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(pcm_8k), timeout=duration + 10)
+        if stderr:
+            log.debug("[tapo %s] ffmpeg: %s", host, stderr.decode().strip())
+    except asyncio.TimeoutError:
+        proc.kill()
+        log.error("[tapo %s] ffmpeg backchannel timeout", host)
 
 
 async def tapo_talk_file(host: str, password: str, filepath: str, volume: float = 1.0) -> None:
-    """Decode audio file → PCM 8kHz and send to Tapo speaker."""
+    """Decode audio file → PCM 8kHz and send to Tapo speaker via backchannel."""
     import av
     import numpy as np
 
@@ -67,7 +63,7 @@ async def tapo_talk_file(host: str, password: str, filepath: str, volume: float 
 
 
 async def pump_tapo_mic_to_queue(host: str, password: str, queue: "AudioQueue") -> None:
-    """Stream Tapo mic audio (RTSP) into AudioQueue as s16le 16kHz."""
+    """Stream Tapo mic audio via RTSP into AudioQueue as s16le 16kHz."""
     rtsp_url = f"rtsp://admin:{password}@{host}/stream1"
     from mic_satellite import pump_rtsp_to_queue
     await pump_rtsp_to_queue(rtsp_url, queue)
