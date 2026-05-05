@@ -17,6 +17,7 @@ from mts import MTSSession
 from webrtc_talk import talk_file, talk_tts, talk_with_track, talk_pcm, _AudioFileTrack, FRAME_BYTES
 from mic_satellite import AudioQueue, run_satellite_loop, pump_rtsp_to_queue
 from wyoming_tts import synthesize_to_pcm
+from tapo_talk import tapo_talk_file, tapo_talk_pcm, pump_tapo_mic_to_queue
 
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.DEBUG)
@@ -40,6 +41,7 @@ if os.path.exists(_OPTIONS_PATH):
     TTS_VOICE       = _opts.get("tts_voice", "")
     TTS_LANGUAGE    = _opts.get("tts_language", "fr")
     LISTEN_ENABLED  = bool(_opts.get("listen_enabled", True))
+    _TAPO_LIST      = _opts.get("tapo_cameras", [])
 else:
     USERNAME        = os.environ["ARENTI_USER"]
     PASSWORD        = os.environ["ARENTI_PASS"]
@@ -48,6 +50,7 @@ else:
     TTS_VOICE       = os.environ.get("TTS_VOICE", "")
     TTS_LANGUAGE    = os.environ.get("TTS_LANGUAGE", "fr")
     LISTEN_ENABLED  = os.environ.get("LISTEN_ENABLED", "true").lower() == "true"
+    _TAPO_LIST      = []
 
 CAMERAS: dict[str, dict] = {}
 
@@ -66,6 +69,21 @@ async def get_session() -> ArentiSession:
         await _session.login()
         log.info("Logged in as %s (userId=%s)", USERNAME, _session.user_id)
     return _session
+
+
+def _register_tapo_cameras() -> None:
+    for tc in _TAPO_LIST:
+        name = tc["name"].lower().replace(" ", "_")
+        CAMERAS[name] = {
+            "device_id":      name,
+            "camera_type":    "tapo",
+            "tapo_host":      tc["host"],
+            "tapo_password":  tc["password"],
+            "audio_source":   f"rtsp://admin:{tc['password']}@{tc['host']}/stream1",
+            "pipeline_id":    tc.get("pipeline_id", None),
+            "listen_enabled": bool(tc.get("listen_enabled", True)),
+        }
+        log.info("Registered Tapo camera '%s' at %s", name, tc["host"])
 
 
 async def _discover_cameras() -> None:
@@ -103,7 +121,9 @@ async def _discover_cameras() -> None:
             "pipeline_id":    ov.get("pipeline_id", None),
             "listen_enabled": bool(ov.get("listen_enabled", True)),
         }
-    log.info("Discovered %d camera(s): %s", len(CAMERAS), list(CAMERAS))
+    log.info("Discovered %d Arenti camera(s): %s", len(CAMERAS), list(CAMERAS))
+    _register_tapo_cameras()
+    log.info("Total cameras: %s", list(CAMERAS))
 
 
 def _install_custom_component() -> None:
@@ -155,9 +175,15 @@ app.mount("/static", StaticFiles(directory="/app/static"), name="static")
 
 def _get_camera(name: str) -> dict:
     cam = CAMERAS.get(name)
-    if not cam or not cam["device_id"]:
+    if not cam:
+        raise HTTPException(404, f"Camera '{name}' not configured")
+    if cam.get("camera_type") != "tapo" and not cam.get("device_id"):
         raise HTTPException(404, f"Camera '{name}' not configured")
     return cam
+
+
+def _is_tapo(cam: dict) -> bool:
+    return cam.get("camera_type") == "tapo"
 
 
 async def _mts_for(cam: dict) -> MTSSession:
@@ -174,7 +200,6 @@ async def _mts_for(cam: dict) -> MTSSession:
 async def _play_url_on_camera(cam: dict, url: str) -> None:
     """Download a URL and play it on the camera speaker."""
     import httpx, os
-    # url may be relative (/api/tts_proxy/...) — prepend supervisor base
     if url.startswith("/"):
         base = os.environ.get("HA_BASE_URL", "http://supervisor/core")
         url = base + url
@@ -189,8 +214,11 @@ async def _play_url_on_camera(cam: dict, url: str) -> None:
             f.write(resp.content)
             tmp = f.name
     try:
-        mts = await _mts_for(cam)
-        await talk_file(mts, tmp)
+        if _is_tapo(cam):
+            await tapo_talk_file(cam["tapo_host"], cam["tapo_password"], tmp, volume=VOLUME)
+        else:
+            mts = await _mts_for(cam)
+            await talk_file(mts, tmp)
     finally:
         os.unlink(tmp)
 
@@ -218,6 +246,22 @@ async def _listen_session(cam: dict, camera_name: str) -> None:
             log.error("[%s] Failed to play TTS: %s", camera_name, e)
 
     try:
+        if _is_tapo(cam):
+            queue = AudioQueue()
+            queue.is_pcmu = False
+            queue.source_rate = 16000
+            rtsp_task = asyncio.ensure_future(
+                pump_tapo_mic_to_queue(cam["tapo_host"], cam["tapo_password"], queue)
+            )
+            try:
+                await run_satellite_loop(queue, camera_name,
+                                          pipeline_id=pipeline_id,
+                                          on_tts_url=on_tts_url,
+                                          stop_event=stop_event)
+            finally:
+                rtsp_task.cancel()
+            return
+
         if audio_source == "arenti":
             while not stop_event.is_set():
                 queue = AudioQueue()
@@ -314,8 +358,11 @@ async def talk_audio(
 
     async def _run():
         try:
-            mts = await _mts_for(cam)
-            await talk_file(mts, tmp, volume=VOLUME)
+            if _is_tapo(cam):
+                await tapo_talk_file(cam["tapo_host"], cam["tapo_password"], tmp, volume=VOLUME)
+            else:
+                mts = await _mts_for(cam)
+                await talk_file(mts, tmp, volume=VOLUME)
         except TimeoutError:
             log.error("[%s] WebRTC connection timeout", camera)
         except Exception as e:
@@ -422,15 +469,30 @@ async def talk_text(camera: str, req: TTSRequest, background_tasks: BackgroundTa
 
     async def _run():
         try:
-            mts = await _mts_for(cam)
             uri = req.wyoming_uri or WYOMING_TTS_URI
-            if uri:
-                voice = req.voice or TTS_VOICE or None
-                lang  = req.lang or TTS_LANGUAGE
-                pcm = await synthesize_to_pcm(uri, req.text, voice=voice, language=lang)
-                await talk_pcm(mts, pcm, volume=VOLUME)
+            voice = req.voice or TTS_VOICE or None
+            lang  = req.lang or TTS_LANGUAGE
+            if _is_tapo(cam):
+                if uri:
+                    pcm = await synthesize_to_pcm(uri, req.text, voice=voice, language=lang)
+                    await tapo_talk_pcm(cam["tapo_host"], cam["tapo_password"], pcm, volume=VOLUME)
+                else:
+                    # gTTS fallback: générer fichier tmp
+                    from gtts import gTTS
+                    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
+                        gTTS(text=req.text, lang=lang).save(f.name)
+                        tmp = f.name
+                    try:
+                        await tapo_talk_file(cam["tapo_host"], cam["tapo_password"], tmp, volume=VOLUME)
+                    finally:
+                        os.unlink(tmp)
             else:
-                await talk_tts(mts, req.text, req.lang, volume=VOLUME)
+                mts = await _mts_for(cam)
+                if uri:
+                    pcm = await synthesize_to_pcm(uri, req.text, voice=voice, language=lang)
+                    await talk_pcm(mts, pcm, volume=VOLUME)
+                else:
+                    await talk_tts(mts, req.text, req.lang, volume=VOLUME)
         except TimeoutError:
             log.error("[%s] WebRTC connection timeout (camera unreachable?)", camera)
         except Exception as e:

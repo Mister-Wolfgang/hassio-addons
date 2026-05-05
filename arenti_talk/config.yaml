@@ -1,6 +1,7 @@
 name: "2way Audio Arenti"
 
 version: "1.0.24"
+
 slug: "2way_audio_arenti"
 description: "Haut-parleur et micro satellite HA pour caméras Arenti/Meari"
 arch:
@@ -39,6 +40,7 @@ options:
   tts_language: "fr"
   listen_enabled: true
   camera_overrides: []
+  tapo_cameras: []
 
 schema:
   arenti_email: email
@@ -51,6 +53,12 @@ schema:
   camera_overrides:
     - name: str
       audio_source: "str?"
+      pipeline_id: "str?"
+      listen_enabled: "bool?"
+  tapo_cameras:
+    - name: str
+      host: str
+      password: str
       pipeline_id: "str?"
       listen_enabled: "bool?"
 
