@@ -55,6 +55,7 @@ schema:
       audio_source: "str?"
       pipeline_id: "str?"
       listen_enabled: "bool?"
+      go2rtc_stream: "str?"
   tapo_cameras:
     - name: str
       host: str

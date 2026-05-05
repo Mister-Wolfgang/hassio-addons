@@ -79,6 +79,7 @@ def _register_tapo_cameras() -> None:
             "camera_type":    "tapo",
             "tapo_host":      tc["host"],
             "tapo_password":  tc["password"],
+            "go2rtc_stream":  tc.get("go2rtc_stream", name),
             "audio_source":   f"rtsp://admin:{tc['password']}@{tc['host']}/stream1",
             "pipeline_id":    tc.get("pipeline_id", None),
             "listen_enabled": bool(tc.get("listen_enabled", True)),
@@ -215,7 +216,7 @@ async def _play_url_on_camera(cam: dict, url: str) -> None:
             tmp = f.name
     try:
         if _is_tapo(cam):
-            await tapo_talk_file(cam["tapo_host"], cam["tapo_password"], tmp, volume=VOLUME)
+            await tapo_talk_file(cam["go2rtc_stream"], tmp, volume=VOLUME)
         else:
             mts = await _mts_for(cam)
             await talk_file(mts, tmp)
@@ -251,7 +252,7 @@ async def _listen_session(cam: dict, camera_name: str) -> None:
             queue.is_pcmu = False
             queue.source_rate = 16000
             rtsp_task = asyncio.ensure_future(
-                pump_tapo_mic_to_queue(cam["tapo_host"], cam["tapo_password"], queue)
+                pump_tapo_mic_to_queue(cam["tapo_host"], cam["tapo_password"], queue)  # mic via RTSP direct
             )
             try:
                 await run_satellite_loop(queue, camera_name,
@@ -359,7 +360,7 @@ async def talk_audio(
     async def _run():
         try:
             if _is_tapo(cam):
-                await tapo_talk_file(cam["tapo_host"], cam["tapo_password"], tmp, volume=VOLUME)
+                await tapo_talk_file(cam["go2rtc_stream"], tmp, volume=VOLUME)
             else:
                 mts = await _mts_for(cam)
                 await talk_file(mts, tmp, volume=VOLUME)
@@ -475,7 +476,7 @@ async def talk_text(camera: str, req: TTSRequest, background_tasks: BackgroundTa
             if _is_tapo(cam):
                 if uri:
                     pcm = await synthesize_to_pcm(uri, req.text, voice=voice, language=lang)
-                    await tapo_talk_pcm(cam["tapo_host"], cam["tapo_password"], pcm, volume=VOLUME)
+                    await tapo_talk_pcm(cam["go2rtc_stream"], pcm, volume=VOLUME)
                 else:
                     # gTTS fallback: générer fichier tmp
                     from gtts import gTTS
@@ -483,7 +484,7 @@ async def talk_text(camera: str, req: TTSRequest, background_tasks: BackgroundTa
                         gTTS(text=req.text, lang=lang).save(f.name)
                         tmp = f.name
                     try:
-                        await tapo_talk_file(cam["tapo_host"], cam["tapo_password"], tmp, volume=VOLUME)
+                        await tapo_talk_file(cam["go2rtc_stream"], tmp, volume=VOLUME)
                     finally:
                         os.unlink(tmp)
             else:
