@@ -1,7 +1,7 @@
 """Tapo camera talkback and audio capture via pytapo."""
 import asyncio
 import logging
-import audioop
+import concurrent.futures
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -9,30 +9,43 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="tapo")
+
+
+def _run_in_new_loop(coro):
+    """Run an async coroutine in a fresh event loop (for pytapo which calls asyncio.run internally)."""
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
 
 async def tapo_talk_pcm(host: str, password: str, pcm_8k: bytes, volume: float = 1.0) -> None:
     """Send raw PCM s16le 8kHz to Tapo camera speaker."""
-    from pytapo import Tapo
     import numpy as np
 
     if volume != 1.0:
         arr = np.frombuffer(pcm_8k, dtype="<i2").astype("float32") * volume
         pcm_8k = arr.clip(-32768, 32767).astype("<i2").tobytes()
 
-    tapo = Tapo(host, "admin", password)
-    await asyncio.get_event_loop().run_in_executor(None, _send_audio_sync, tapo, pcm_8k)
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(_executor, _send_audio_sync, host, password, pcm_8k)
 
 
-def _send_audio_sync(tapo, pcm_s16le_8k: bytes) -> None:
-    """Blocking: encode PCM → µ-law and stream to Tapo."""
-    # Convert s16le → µ-law (PCMU) for Tapo
-    pcmu = audioop.ulaw2lin(audioop.lin2ulaw(pcm_s16le_8k, 2), 2)
-    # pytapo expects raw PCM s16le — revert to s16le after µ-law round-trip
-    tapo.startAudioOutput()
-    chunk_size = 3200  # 200ms @ 8kHz s16le
-    for i in range(0, len(pcm_s16le_8k), chunk_size):
-        tapo.transmitAudio(pcm_s16le_8k[i:i + chunk_size])
-    tapo.stopAudioOutput()
+def _send_audio_sync(host: str, password: str, pcm_s16le_8k: bytes) -> None:
+    """Blocking in its own thread+loop: authenticate and stream PCM to Tapo."""
+    from pytapo import Tapo
+
+    async def _inner():
+        tapo = Tapo(host, "admin", password)
+        await tapo.startAudioOutput()
+        chunk_size = 3200  # 200ms @ 8kHz s16le
+        for i in range(0, len(pcm_s16le_8k), chunk_size):
+            await tapo.transmitAudio(pcm_s16le_8k[i:i + chunk_size])
+        await tapo.stopAudioOutput()
+
+    _run_in_new_loop(_inner())
 
 
 async def tapo_talk_file(host: str, password: str, filepath: str, volume: float = 1.0) -> None:
