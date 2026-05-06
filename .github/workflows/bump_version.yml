@@ -6,6 +6,7 @@ on:
     branches: [main]
     paths:
       - 'arenti_talk/**'
+      - 'twowayaudio/**'
 
 jobs:
   bump:
@@ -19,24 +20,35 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Bump patch version in config.yaml
+      - name: Bump patch version
         id: bump
         run: |
-          FILE=arenti_talk/config.yaml
-          CURRENT=$(grep '^version:' "$FILE" | sed 's/version: *"\?\([0-9][0-9.]*\)"\?/\1/')
-          MAJOR=$(echo "$CURRENT" | cut -d. -f1)
-          MINOR=$(echo "$CURRENT" | cut -d. -f2)
-          PATCH=$(echo "$CURRENT" | cut -d. -f3)
-          NEW="$MAJOR.$MINOR.$((PATCH + 1))"
-          sed -i "s/^version:.*/version: \"$NEW\"/" "$FILE"
-          sed -i "s/io\.hass\.version=\"[^\"]*\"/io.hass.version=\"$NEW\"/" arenti_talk/Dockerfile
-          echo "version=$NEW" >> $GITHUB_OUTPUT
-          echo "Bumped $CURRENT → $NEW"
+          bump_addon() {
+            FILE="$1/config.yaml"
+            DOCKERFILE="$1/Dockerfile"
+            CURRENT=$(grep '^version:' "$FILE" | sed 's/version: *"\?\([0-9][0-9.]*\)"\?/\1/')
+            MAJOR=$(echo "$CURRENT" | cut -d. -f1)
+            MINOR=$(echo "$CURRENT" | cut -d. -f2)
+            PATCH=$(echo "$CURRENT" | cut -d. -f3)
+            NEW="$MAJOR.$MINOR.$((PATCH + 1))"
+            sed -i "s/^version:.*/version: \"$NEW\"/" "$FILE"
+            sed -i "s/io\.hass\.version=\"[^\"]*\"/io.hass.version=\"$NEW\"/" "$DOCKERFILE"
+            echo "Bumped $1: $CURRENT → $NEW"
+          }
+
+          git diff --name-only HEAD~1 HEAD > changed_files.txt || git diff --name-only HEAD changed_files.txt
+
+          if grep -q '^arenti_talk/' changed_files.txt; then
+            bump_addon arenti_talk
+          fi
+          if grep -q '^twowayaudio/' changed_files.txt; then
+            bump_addon twowayaudio
+          fi
 
       - name: Commit version bump
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add arenti_talk/config.yaml arenti_talk/Dockerfile
-          git diff --staged --quiet || git commit -m "chore: bump version to ${{ steps.bump.outputs.version }} [skip ci]"
+          git add arenti_talk/config.yaml arenti_talk/Dockerfile twowayaudio/config.yaml twowayaudio/Dockerfile
+          git diff --staged --quiet || git commit -m "chore: bump version [skip ci]"
           git push
