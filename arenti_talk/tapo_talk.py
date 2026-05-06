@@ -55,10 +55,15 @@ class _PCMATrack:
 
 async def tapo_talk_pcm(stream_name: str, pcm_8k: bytes, volume: float = 1.0) -> None:
     """Send PCM s16le 8kHz to Tapo speaker via go2rtc WebRTC (sendonly)."""
-    import httpx
-    from aiortc import RTCPeerConnection, RTCSessionDescription
-    from aiortc.contrib.media import MediaPlayer
-    import numpy as np
+    import traceback
+    try:
+        import httpx
+        from aiortc import RTCPeerConnection, RTCSessionDescription
+        import numpy as np
+        log.info("[tapo %s] imports ok, GO2RTC_API=%s", stream_name, GO2RTC_API)
+    except Exception:
+        log.error("[tapo %s] import error:\n%s", stream_name, traceback.format_exc())
+        return
 
     if volume != 1.0:
         arr = np.frombuffer(pcm_8k, dtype='<i2').astype('float32') * volume
