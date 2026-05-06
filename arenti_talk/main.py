@@ -500,7 +500,7 @@ async def talk_text(camera: str, req: TTSRequest, background_tasks: BackgroundTa
         except TimeoutError:
             log.error("[%s] WebRTC connection timeout (camera unreachable?)", camera)
         except Exception as e:
-            log.error("[%s] TTS failed: %s", camera, e)
+            log.exception("[%s] TTS failed: %s", camera, e)
 
     background_tasks.add_task(_run)
     return {"status": "playing", "camera": camera, "text": req.text}
