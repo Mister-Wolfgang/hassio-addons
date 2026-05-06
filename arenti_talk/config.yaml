@@ -39,6 +39,7 @@ options:
   tts_voice: ""
   tts_language: "fr"
   listen_enabled: true
+  go2rtc_rtsp: "rtsp://192.168.1.131:8554"
   camera_overrides: []
   tapo_cameras: []
 
@@ -50,6 +51,7 @@ schema:
   tts_voice: "str?"
   tts_language: "str?"
   listen_enabled: bool
+  go2rtc_rtsp: "str?"
   camera_overrides:
     - name: str
       audio_source: "str?"
@@ -62,5 +64,6 @@ schema:
       password: str
       pipeline_id: "str?"
       listen_enabled: "bool?"
+      go2rtc_stream: "str?"
 
 watchdog: "http://[HOST]:[PORT:8080]/health"

@@ -1,6 +1,7 @@
 """Tapo camera talkback via go2rtc RTSP push and mic via RTSP."""
 import asyncio
 import logging
+import os
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -8,26 +9,27 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-GO2RTC_RTSP = "rtsp://192.168.1.131:8554"
+GO2RTC_RTSP = os.environ.get("GO2RTC_RTSP", "rtsp://192.168.1.131:8554")
 
 
 async def tapo_talk_pcm(stream_name: str, pcm_8k: bytes, volume: float = 1.0) -> None:
-    """Push PCM s16le 8kHz to go2rtc RTSP server → forwarded to Tapo speaker."""
+    """Push PCM s16le 8kHz to go2rtc RTSP → forwarded to Tapo speaker via tapo:// backchannel."""
     import numpy as np
 
     if volume != 1.0:
         arr = np.frombuffer(pcm_8k, dtype="<i2").astype("float32") * volume
         pcm_8k = arr.clip(-32768, 32767).astype("<i2").tobytes()
 
-    duration = len(pcm_8k) / (8000 * 2) + 2
+    duration = len(pcm_8k) / (8000 * 2) + 3
     url = f"{GO2RTC_RTSP}/{stream_name}"
 
     cmd = [
         "ffmpeg", "-loglevel", "warning",
         "-f", "s16le", "-ar", "8000", "-ac", "1",
         "-i", "pipe:0",
-        "-c:a", "pcm_mulaw", "-ar", "8000", "-ac", "1",
+        "-c:a", "pcm_alaw", "-ar", "8000", "-ac", "1",
         "-f", "rtsp", "-rtsp_transport", "tcp",
+        "-sdp_flags", "custom_io",
         url,
     ]
     proc = await asyncio.create_subprocess_exec(

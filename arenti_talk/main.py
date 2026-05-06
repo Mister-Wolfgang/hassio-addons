@@ -42,6 +42,7 @@ if os.path.exists(_OPTIONS_PATH):
     TTS_LANGUAGE    = _opts.get("tts_language", "fr")
     LISTEN_ENABLED  = bool(_opts.get("listen_enabled", True))
     _TAPO_LIST      = _opts.get("tapo_cameras", [])
+    os.environ["GO2RTC_RTSP"] = _opts.get("go2rtc_rtsp", "rtsp://192.168.1.131:8554")
 else:
     USERNAME        = os.environ["ARENTI_USER"]
     PASSWORD        = os.environ["ARENTI_PASS"]
