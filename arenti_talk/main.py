@@ -43,8 +43,9 @@ if os.path.exists(_OPTIONS_PATH):
     LISTEN_ENABLED  = bool(_opts.get("listen_enabled", True))
     _TAPO_LIST      = _opts.get("tapo_cameras", [])
     _go2rtc = _opts.get("go2rtc_rtsp", "rtsp://192.168.1.131:8554")
+    _go2rtc_api = _go2rtc.replace("rtsp://", "http://").replace(":8554", ":1984")
     os.environ["GO2RTC_RTSP"] = _go2rtc
-    os.environ["GO2RTC_API"]  = _go2rtc.replace("rtsp://", "http://").replace(":8554", ":1984")
+    os.environ["GO2RTC_API"]  = _go2rtc_api
 else:
     USERNAME        = os.environ["ARENTI_USER"]
     PASSWORD        = os.environ["ARENTI_PASS"]
@@ -147,6 +148,15 @@ def _install_custom_component() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _install_custom_component()
+    # Test go2rtc connectivity
+    import httpx as _httpx
+    _api = os.environ.get("GO2RTC_API", "http://192.168.1.131:1984")
+    try:
+        async with _httpx.AsyncClient(timeout=3) as _c:
+            _r = await _c.get(f"{_api}/api/streams")
+        log.info("go2rtc reachable at %s (%d streams)", _api, len(_r.json()))
+    except Exception as _e:
+        log.warning("go2rtc NOT reachable at %s: %s", _api, _e)
     await _discover_cameras()
     yield
     for task in _listen_tasks.values():
