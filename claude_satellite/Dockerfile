@@ -4,9 +4,7 @@ FROM ${BUILD_FROM}
 RUN apk add --no-cache \
     ffmpeg \
     nodejs \
-    npm \
-    dbus \
-    gnome-keyring
+    npm
 
 RUN npm install -g @anthropic-ai/claude-code
 
