@@ -1,9 +1,10 @@
-"""Entry point FastAPI — health check + démarrage du satellite."""
+"""Entry point FastAPI — satellite vocal + login OAuth pour keyring Claude."""
 import asyncio
 import json
 import logging
 import os
 import re
+import subprocess
 from contextlib import asynccontextmanager
 
 import httpx
@@ -20,176 +21,7 @@ log = logging.getLogger(__name__)
 
 OPTIONS_PATH = os.environ.get("OPTIONS_PATH", "/data/options.json")
 _satellite: MultiMicSatellite | None = None
-_login_pty_fd: int | None = None  # master_fd du PTY de login en cours
-
-
-class ClaudeSession:
-    """Process claude interactif gardé en vie après login — token en RAM."""
-
-    def __init__(self, master_fd: int, proc):
-        self.master_fd = master_fd
-        self.proc = proc
-        self._lock = asyncio.Lock()
-
-    def is_alive(self) -> bool:
-        return self.proc.poll() is None
-
-    async def query(self, prompt: str, timeout: float = 90.0) -> str:
-        """Envoie un prompt au PTY, retourne le texte RÉPONSE_VOCALE."""
-        async with self._lock:
-            return await self._do_query(prompt, timeout)
-
-    async def _do_query(self, prompt: str, timeout: float) -> str:
-        import select as _sel
-        # Bracketed paste pour envoyer du texte multi-ligne sans que le TUI
-        # n'interprète chaque \n comme "Envoyer".
-        payload = b"\x1b[200~" + prompt.encode("utf-8") + b"\x1b[201~\r"
-        try:
-            os.write(self.master_fd, payload)
-        except OSError as e:
-            log.error("ClaudeSession write error: %s", e)
-            return ""
-
-        buf = ""
-        last_log_len = 0
-        deadline = asyncio.get_event_loop().time() + timeout
-        while asyncio.get_event_loop().time() < deadline:
-            await asyncio.sleep(0.05)
-            r, _, _ = _sel.select([self.master_fd], [], [], 0)
-            if not r:
-                continue
-            try:
-                chunk = os.read(self.master_fd, 4096).decode("utf-8", errors="replace")
-            except OSError:
-                break
-            clean = re.sub(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])", "", chunk)
-            clean = re.sub(r"[\x00-\x1f\x7f]", " ", clean)
-            buf += clean
-            # Log périodique pour voir ce que Claude écrit
-            if len(buf) - last_log_len > 500:
-                last_log_len = len(buf)
-                log.debug("Claude output (buf=%d): %r", len(buf), buf[-300:])
-            m = re.search(r"RÉPONSE_VOCALE\s*:\s*(.+)", buf, re.IGNORECASE)
-            if m:
-                log.info("ClaudeSession réponse: %r", m.group(1).strip())
-                return m.group(1).strip()
-        log.warning("ClaudeSession timeout après %.0fs — dernier output: %r", timeout, buf[-500:])
-        return ""
-
-    def close(self):
-        try:
-            os.close(self.master_fd)
-        except OSError:
-            pass
-        if self.proc.poll() is None:
-            self.proc.terminate()
-
-
-_claude_session: ClaudeSession | None = None
-_auto_start_task: asyncio.Task | None = None
-
-
-async def _dismiss_setup_screens(master_fd: int, timeout: float = 12.0) -> int:
-    """Envoie Enter pour chaque écran 'Press Enter to continue' jusqu'au prompt interactif.
-    Retourne le nombre d'octets drainés."""
-    import select as _sel
-    buf = ""
-    drained = 0
-    deadline = asyncio.get_event_loop().time() + timeout
-    last_enter = 0.0
-    while asyncio.get_event_loop().time() < deadline:
-        await asyncio.sleep(0.05)
-        r, _, _ = _sel.select([master_fd], [], [], 0)
-        if r:
-            try:
-                chunk = os.read(master_fd, 8192)
-                drained += len(chunk)
-                text = re.sub(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])", "", chunk.decode("utf-8", errors="replace"))
-                text = re.sub(r"[\x00-\x1f\x7f]", "", text)
-                buf += text
-            except OSError:
-                break
-        # Envoyer Enter pour chaque écran "Press Enter to continue"
-        if "press enter to continue" in buf.lower():
-            now = asyncio.get_event_loop().time()
-            if now - last_enter > 0.8:
-                os.write(master_fd, b"\r")
-                last_enter = now
-                buf = ""  # reset pour détecter le prochain écran
-        elif asyncio.get_event_loop().time() - last_enter > 3.0 and last_enter > 0:
-            break  # plus d'écran depuis 3s → on est au prompt
-    return drained
-
-
-async def _auto_start_claude():
-    """Démarre automatiquement la session Claude au startup (keyring requis)."""
-    global _claude_session
-    import pty
-    import subprocess
-    import select as _sel
-
-    await asyncio.sleep(5)  # laisser le container se stabiliser
-    if _claude_session and _claude_session.is_alive():
-        return  # déjà connecté (login manuel anticipé)
-
-    log.info("Auto-démarrage session Claude...")
-    env = {**os.environ, "HOME": "/data"}
-    master_fd, slave_fd = pty.openpty()
-    proc = None
-    login_ok = False
-    try:
-        proc = subprocess.Popen(
-            ["/usr/local/bin/claude"],
-            stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
-            env=env, close_fds=True,
-        )
-        os.close(slave_fd)
-
-        # Passer les écrans de setup
-        await asyncio.sleep(1.5)
-        for _ in range(3):
-            os.write(master_fd, b"\r")
-            await asyncio.sleep(0.8)
-        os.write(master_fd, b"/login\r")
-
-        buf = ""
-        deadline = asyncio.get_event_loop().time() + 45
-        while asyncio.get_event_loop().time() < deadline:
-            await asyncio.sleep(0.05)
-            r, _, _ = _sel.select([master_fd], [], [], 0)
-            if not r:
-                continue
-            try:
-                chunk = os.read(master_fd, 4096).decode("utf-8", errors="replace")
-            except OSError:
-                break
-            clean = re.sub(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])", "", chunk)
-            clean = re.sub(r"[\x00-\x1f\x7f]", "", clean)
-            buf += clean
-
-            if re.search(r"https://claude\.com\S{10,}", buf):
-                log.info("Auto-démarrage: keyring vide → visiter /login pour l'OAuth")
-                return
-
-            if "*" * 20 in buf or any(p in buf.lower() for p in
-                                       ("login successful", "logged in", "claude >", "claude>")):
-                login_ok = True
-                drained = await _dismiss_setup_screens(master_fd)
-                _claude_session = ClaudeSession(master_fd, proc)
-                log.info("Auto-démarrage réussi — session Claude active (%d octets drainés)", drained)
-                return
-
-        log.warning("Auto-démarrage: timeout — visiter /login pour s'authentifier")
-    except Exception as e:
-        log.error("Auto-démarrage erreur: %s", e)
-    finally:
-        if not login_ok:
-            try:
-                os.close(master_fd)
-            except OSError:
-                pass
-            if proc and proc.poll() is None:
-                proc.terminate()
+_login_pty_fd: int | None = None
 
 
 def _load_config() -> dict:
@@ -198,59 +30,44 @@ def _load_config() -> dict:
 
 
 async def _get_frigate_rtsp_base(ha_headers: dict) -> str | None:
-    """Trouve l'URL RTSP go2rtc depuis la config de l'intégration Frigate dans HA."""
     try:
         async with httpx.AsyncClient() as c:
             r = await c.get(
                 "http://supervisor/core/api/config/config_entries/entry",
-                headers=ha_headers,
-                timeout=10,
+                headers=ha_headers, timeout=10,
             )
             r.raise_for_status()
             entries = r.json()
     except Exception as e:
         log.warning("Impossible de lire les config_entries HA: %s", e)
         return None
-
     for entry in entries:
         if entry.get("domain") != "frigate":
             continue
-        title = entry.get("title", "")
-        # title = "192.168.1.131:5000" → on extrait l'hôte
-        host = title.split(":")[0]
+        host = entry.get("title", "").split(":")[0]
         if host:
             rtsp_base = f"rtsp://{host}:8554"
-            log.info("Frigate détecté via config_entry: %s → RTSP base: %s", title, rtsp_base)
+            log.info("Frigate détecté: %s → RTSP base: %s", entry["title"], rtsp_base)
             return rtsp_base
-
     return None
 
 
 async def _discover_cameras(go2rtc_rtsp: str) -> list[CameraConfig]:
-    """Découvre automatiquement les caméras Frigate depuis les states HA."""
     ha_token = os.environ.get("SUPERVISOR_TOKEN", "")
     headers = {"Authorization": f"Bearer {ha_token}"}
-
-    # Auto-découverte de l'URL RTSP si non configurée explicitement
     rtsp_base = go2rtc_rtsp
     if not go2rtc_rtsp or go2rtc_rtsp == "rtsp://homeassistant:8554":
         discovered = await _get_frigate_rtsp_base(headers)
         if discovered:
             rtsp_base = discovered
-
     try:
         async with httpx.AsyncClient() as c:
-            r = await c.get(
-                "http://supervisor/core/api/states",
-                headers=headers,
-                timeout=10,
-            )
+            r = await c.get("http://supervisor/core/api/states", headers=headers, timeout=10)
             r.raise_for_status()
             states = r.json()
     except Exception as e:
-        log.error("Impossible de contacter l'API HA pour la découverte: %s", e)
+        log.error("Impossible de contacter l'API HA: %s", e)
         return []
-
     cameras = []
     for state in states:
         entity_id = state.get("entity_id", "")
@@ -259,27 +76,22 @@ async def _discover_cameras(go2rtc_rtsp: str) -> list[CameraConfig]:
         attrs = state.get("attributes", {})
         if attrs.get("client_id") != "frigate":
             continue
-
         camera_name = attrs.get("camera_name") or entity_id.removeprefix("camera.")
         friendly_name = attrs.get("friendly_name", camera_name)
-        rtsp_url = f"{rtsp_base}/{camera_name}"
-
         cameras.append(CameraConfig(
             name=camera_name,
             room=friendly_name,
-            rtsp_url=rtsp_url,
+            rtsp_url=f"{rtsp_base}/{camera_name}",
             frigate_camera=camera_name,
             talkback_camera=camera_name,
         ))
-        log.info("Caméra découverte: %s (%s) -> %s", camera_name, friendly_name, rtsp_url)
-
+        log.info("Caméra découverte: %s (%s)", camera_name, friendly_name)
     return cameras
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _satellite
-
     config = _load_config()
     go2rtc_rtsp = config.get("go2rtc_rtsp", "rtsp://homeassistant:8554")
 
@@ -297,25 +109,29 @@ async def lifespan(app: FastAPI):
             ))
         log.info("%d caméra(s) chargée(s) depuis la config", len(cameras))
     else:
-        log.info("Auto-découverte des caméras Frigate via l'API HA...")
+        log.info("Auto-découverte des caméras Frigate...")
         cameras = await _discover_cameras(go2rtc_rtsp)
         if cameras:
-            # Déduire l'URL Frigate HTTP depuis la même IP que go2rtc
             rtsp_host = go2rtc_rtsp.replace("rtsp://", "").split(":")[0]
             if rtsp_host not in ("homeassistant", "localhost"):
                 config.setdefault("frigate_url", f"http://{rtsp_host}:5000")
-                log.info("Frigate URL: %s", config["frigate_url"])
         else:
-            log.warning("Aucune caméra Frigate trouvée — satellite inactif")
+            log.warning("Aucune caméra trouvée — satellite inactif")
+
+    # Vérifier si Claude est déjà authentifié (keyring)
+    r = subprocess.run(
+        ["claude", "--version"],
+        capture_output=True, env={**os.environ, "HOME": "/data"}, timeout=10,
+    )
+    if r.returncode == 0:
+        log.info("Claude CLI disponible: %s", r.stdout.decode().strip())
+    else:
+        log.warning("Claude CLI non disponible ou non authentifié — visiter /login")
 
     _satellite = MultiMicSatellite(cameras=cameras, config=config)
     task = asyncio.create_task(_satellite.start())
-    auto_task = asyncio.create_task(_auto_start_claude())
-
     log.info("Claude Satellite démarré — %d caméra(s)", len(cameras))
     yield
-
-    auto_task.cancel()
     task.cancel()
     try:
         await task
@@ -356,7 +172,8 @@ _LOGIN_HTML = """<!DOCTYPE html>
 </head>
 <body>
 <h1>🔐 Claude Satellite — Authentification</h1>
-<p>Connecte ton compte Claude Max pour activer l'assistant vocal.</p>
+<p>Connecte ton compte Claude Max pour activer l'assistant vocal.<br>
+<small style="color:#64748b">À faire une seule fois — les credentials sont sauvegardés.</small></p>
 <button id="btn" onclick="startLogin()">Démarrer le login OAuth</button>
 <div id="status"></div>
 <script>
@@ -365,28 +182,23 @@ async function startLogin() {
   const box = document.getElementById('status');
   btn.disabled = true;
   box.className = 'waiting'; box.style.display = 'block';
-  box.innerHTML = `<span class="spinner"></span> Démarrage…`;
-
+  box.innerHTML = '<span class="spinner"></span> Démarrage…';
   const es = new EventSource('/login/stream');
   es.onmessage = function(e) {
     const d = JSON.parse(e.data);
     if (d.url) {
-      box.innerHTML = `🔗 Ouvre ce lien dans ton navigateur :<br><div id="url-box"><a href="${d.url}" target="_blank">${d.url}</a></div><br><br>Puis colle le code de la page de confirmation :<br><input id="code-input" type="text" placeholder="p9kMbh..." style="width:100%;padding:8px;margin-top:8px;background:#0f1117;color:#e2e8f0;border:1px solid #475569;border-radius:6px;font-size:.9rem"><br><button onclick="submitCode()" style="margin-top:8px;background:#6366f1;color:white;border:none;padding:8px 20px;border-radius:6px;cursor:pointer">Envoyer le code</button><br><br><span class="spinner"></span> En attente…`;
+      box.innerHTML = '🔗 Ouvre ce lien dans ton navigateur :<br><div id="url-box"><a href="'+d.url+'" target="_blank">'+d.url+'</a></div><br><br>Puis colle le code :<br><input id="code-input" type="text" placeholder="p9kMbh..." style="width:100%;padding:8px;margin-top:8px;background:#0f1117;color:#e2e8f0;border:1px solid #475569;border-radius:6px;font-size:.9rem"><br><button onclick="submitCode()" style="margin-top:8px;background:#6366f1;color:white;border:none;padding:8px 20px;border-radius:6px;cursor:pointer">Envoyer</button><br><br><span class="spinner"></span> En attente…';
     } else if (d.status === 'ok') {
       es.close();
-      box.className = 'success'; box.innerHTML = `✅ Connecté ! L'assistant vocal est actif.`;
+      box.className = 'success'; box.innerHTML = '✅ Connecté ! Credentials sauvegardés.';
       btn.textContent = 'OK'; btn.disabled = false;
     } else if (d.status === 'error') {
       es.close();
-      box.className = 'error'; box.innerHTML = `❌ Erreur : ${d.msg}`;
+      box.className = 'error'; box.innerHTML = '❌ Erreur : ' + d.msg;
       btn.disabled = false;
     }
   };
-  es.onerror = function() {
-    es.close();
-    box.className = 'error'; box.innerHTML = '❌ Connexion perdue.';
-    btn.disabled = false;
-  };
+  es.onerror = function() { es.close(); box.className='error'; box.innerHTML='❌ Connexion perdue.'; btn.disabled=false; };
 }
 async function submitCode() {
   const code = document.getElementById('code-input').value.trim();
@@ -408,18 +220,13 @@ async def login_stream():
     async def generator():
         import pty
         import select
-        import subprocess
 
-        global _login_pty_fd, _claude_session
-        # Fermer une session existante avant d'en ouvrir une nouvelle
-        if _claude_session:
-            _claude_session.close()
-            _claude_session = None
-
+        global _login_pty_fd
         env = {**os.environ, "HOME": "/data"}
         master_fd, slave_fd = pty.openpty()
         _login_pty_fd = master_fd
         proc = None
+        login_ok = False
         try:
             proc = subprocess.Popen(
                 ["/usr/local/bin/claude"],
@@ -428,27 +235,16 @@ async def login_stream():
             )
             os.close(slave_fd)
 
-            # Navigue automatiquement à travers l'onboarding puis déclenche /login
-            # Les TUI attendent \r (CR) pour valider, pas \n
             async def send_keys():
                 await asyncio.sleep(1.5)
-                log.info("login: sending Enter (theme)")
-                os.write(master_fd, b"\r")       # Accepte le thème par défaut
-                await asyncio.sleep(1.0)
-                log.info("login: sending Enter (setup 2)")
-                os.write(master_fd, b"\r")       # Éventuel autre écran setup
-                await asyncio.sleep(1.0)
-                log.info("login: sending Enter (setup 3)")
-                os.write(master_fd, b"\r")       # Idem
-                await asyncio.sleep(0.8)
-                log.info("login: sending /login")
-                os.write(master_fd, b"/login\r") # Déclenche l'OAuth
+                for _ in range(3):
+                    os.write(master_fd, b"\r")
+                    await asyncio.sleep(0.8)
+                os.write(master_fd, b"/login\r")
 
             key_task = asyncio.create_task(send_keys())
-
             buf = ""
             url_sent = False
-            login_ok = False
             deadline = asyncio.get_event_loop().time() + 180
 
             while proc.poll() is None:
@@ -458,7 +254,6 @@ async def login_stream():
                     proc.terminate()
                     yield f"data: {json.dumps({'status': 'error', 'msg': 'timeout'})}\n\n"
                     return
-
                 r, _, _ = select.select([master_fd], [], [], 0)
                 if not r:
                     continue
@@ -466,15 +261,12 @@ async def login_stream():
                     chunk = os.read(master_fd, 4096).decode("utf-8", errors="replace")
                 except OSError:
                     break
-
-                # Strip toutes les séquences ANSI/escape du PTY
                 clean = re.sub(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])", "", chunk)
                 clean = clean.replace("\r", "")
                 buf += clean
-                log.info("claude pty: %s", repr(clean.strip()[:300]))
+                log.info("login pty: %s", repr(clean.strip()[:200]))
 
                 searchable = re.sub(r"[\x00-\x1f\x7f]", "", buf)
-
                 if not url_sent:
                     m = re.search(r"https://\S{20,}", searchable)
                     if m:
@@ -483,27 +275,22 @@ async def login_stream():
                         yield f"data: {json.dumps({'url': m.group(0).rstrip('.')})}\n\n"
                         continue
 
-                # Détecte le succès : après URL (OAuth) OU directement (keyring déjà rempli)
+                # Succès quand les credentials sont sauvegardés (animation ***)
                 if not login_ok:
                     low = searchable.lower()
-                    success_patterns = ("logged in", "authenticated", "welcome back",
-                                        "signed in", "login successful",
-                                        "you are now", "session started",
-                                        "claude >", "claude>",
-                                        "*" * 20)
-                    if any(p in low for p in success_patterns):
-                        log.info("login: succès (keyring=%s) — session conservée en mémoire",
-                                 "existant" if not url_sent else "nouveau")
+                    if "*" * 20 in searchable or any(p in low for p in (
+                            "login successful", "logged in", "authenticated")):
                         login_ok = True
                         key_task.cancel()
-                        drained = await _dismiss_setup_screens(master_fd)
-                        log.info("login: prêt (%d octets drainés)", drained)
-                        _claude_session = ClaudeSession(master_fd, proc)
+                        log.info("login: succès OAuth — credentials dans le keyring")
+                        # Tuer le processus claude (on n'a plus besoin de la session TUI)
+                        await asyncio.sleep(0.5)
+                        proc.terminate()
                         yield f"data: {json.dumps({'status': 'ok'})}\n\n"
                         return
 
             key_task.cancel()
-            if login_ok or proc.returncode == 0:
+            if login_ok or proc.returncode in (0, -15):
                 yield f"data: {json.dumps({'status': 'ok'})}\n\n"
             else:
                 yield f"data: {json.dumps({'status': 'error', 'msg': f'exit {proc.returncode}'})}\n\n"
@@ -512,14 +299,12 @@ async def login_stream():
             yield f"data: {json.dumps({'status': 'error', 'msg': str(e)})}\n\n"
         finally:
             _login_pty_fd = None
-            # Ne fermer que si le login a échoué (succès = session persistante)
-            if not login_ok:
-                try:
-                    os.close(master_fd)
-                except OSError:
-                    pass
-                if proc and proc.poll() is None:
-                    proc.terminate()
+            try:
+                os.close(master_fd)
+            except OSError:
+                pass
+            if proc and proc.poll() is None:
+                proc.terminate()
 
     return StreamingResponse(generator(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
@@ -554,21 +339,18 @@ async def index():
 
 @app.post("/trigger/{camera_name}")
 async def trigger_wake(camera_name: str):
-    """Déclenche manuellement le pipeline pour une caméra (debug)."""
     if not _satellite:
         return JSONResponse({"ok": False, "error": "satellite not running"})
     stream = _satellite.streams.get(camera_name)
     if not stream:
-        available = list(_satellite.streams.keys())
-        return JSONResponse({"ok": False, "error": f"camera '{camera_name}' inconnue", "available": available})
+        return JSONResponse({"ok": False, "error": f"camera inconnue", "available": list(_satellite.streams.keys())})
     from satellite import WakeEvent
+    import time
     event = WakeEvent(
-        camera=stream.camera,
-        ww_score=1.0,
-        rms=stream.rms,
-        timestamp=__import__("time").monotonic(),
+        camera=stream.camera, ww_score=1.0, rms=stream.rms,
+        timestamp=time.monotonic(),
         all_scores={camera_name: 1.0},
         all_rms={n: s.rms for n, s in _satellite.streams.items()},
     )
     asyncio.ensure_future(_satellite._on_wake(event))
-    return JSONResponse({"ok": True, "camera": camera_name, "rms": round(stream.rms, 4)})
+    return JSONResponse({"ok": True, "camera": camera_name})

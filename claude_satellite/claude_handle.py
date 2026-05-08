@@ -1,6 +1,8 @@
-"""Appel Claude via la session interactive persistante (token en RAM)."""
+"""Appel Claude via claude -p (mode non-interactif, credentials depuis keyring)."""
+import asyncio
 import logging
 import os
+import re
 
 log = logging.getLogger(__name__)
 
@@ -29,29 +31,47 @@ def _build_prompt(transcript: str, context: dict) -> str:
     )
     scores_lines = "\n".join(
         f"  - {cam}: rms={context['rms_values'].get(cam, 0):.3f}"
-        for cam, score in context.get("ww_scores", {}).items()
+        for cam in context.get("ww_scores", {})
     )
-
-    return f"""{SYSTEM_PROMPT}
-
-## Caméras / Pièces
-{cameras_lines}
-
-## Niveau audio au wake word (rms élevé = personne proche)
-{scores_lines}
-
----
-Commande vocale : "{transcript}"
-"""
+    return (
+        f"{SYSTEM_PROMPT}\n"
+        f"## Caméras / Pièces\n{cameras_lines}\n\n"
+        f"## Niveau audio (rms élevé = personne proche)\n{scores_lines}\n\n"
+        f"---\nCommande vocale : \"{transcript}\"\n"
+    )
 
 
 async def handle(transcript: str, context: dict, **_) -> str:
-    """Route la commande vers la session Claude persistante."""
-    from main import _claude_session  # import tardif pour éviter les cycles
-
-    if _claude_session is None or not _claude_session.is_alive():
-        log.error("Aucune session Claude active — connectez-vous via /login")
-        return ""
-
+    """Lance claude -p avec le prompt et retourne le texte RÉPONSE_VOCALE."""
     prompt = _build_prompt(transcript, context)
-    return await _claude_session.query(prompt)
+    env = {**os.environ, "HOME": "/data"}
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "claude", "-p", prompt,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=90.0)
+        except asyncio.TimeoutError:
+            proc.kill()
+            log.warning("claude -p timeout")
+            return ""
+
+        if proc.returncode != 0:
+            log.error("claude -p exit %d: %s", proc.returncode,
+                      stderr.decode("utf-8", errors="replace")[:300])
+            return ""
+
+        output = stdout.decode("utf-8", errors="replace")
+        log.debug("claude -p output: %r", output[-400:])
+        m = re.search(r"RÉPONSE_VOCALE\s*:\s*(.+)", output, re.IGNORECASE)
+        if m:
+            log.info("Claude réponse: %r", m.group(1).strip())
+            return m.group(1).strip()
+        log.warning("claude -p: pas de RÉPONSE_VOCALE — output: %r", output[-200:])
+        return ""
+    except Exception as e:
+        log.error("claude -p error: %s", e)
+        return ""
