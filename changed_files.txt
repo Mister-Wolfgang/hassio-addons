@@ -1,1 +1,1 @@
-claude_satellite/main.py
+claude_satellite/claude_handle.py
