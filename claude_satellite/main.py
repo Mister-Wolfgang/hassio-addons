@@ -283,12 +283,16 @@ async def login_stream():
                 except OSError:
                     break
 
-                clean = re.sub(r"\x1b\[[0-9;]*[mABCDHfJKST]|\x1b\].*?\x07|\r", "", chunk)
+                # Strip toutes les séquences ANSI/escape du PTY
+                clean = re.sub(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])", "", chunk)
+                clean = clean.replace("\r", "")
                 buf += clean
                 log.info("claude pty: %s", repr(clean.strip()[:120]))
 
                 if not url_sent:
-                    m = re.search(r"https://[^\s\x00-\x1f]+", buf)
+                    # Supprimer les caractères de contrôle restants avant de chercher l'URL
+                    searchable = re.sub(r"[\x00-\x1f\x7f]", "", buf)
+                    m = re.search(r"https://\S{20,}", searchable)
                     if m:
                         url_sent = True
                         yield f"data: {json.dumps({'url': m.group(0).rstrip('.')})}\n\n"
