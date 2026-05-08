@@ -3,11 +3,12 @@ import asyncio
 import json
 import logging
 import os
+import re
 from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse, StreamingResponse
 
 from satellite import MultiMicSatellite, CameraConfig
 
@@ -157,6 +158,109 @@ app = FastAPI(title="Claude Satellite", lifespan=lifespan)
 async def health():
     n = len(_satellite.cameras) if _satellite else 0
     return JSONResponse({"status": "ok", "cameras": n})
+
+
+_LOGIN_HTML = """<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>Claude Satellite — Login</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 600px; margin: 60px auto; padding: 0 20px; background: #0f1117; color: #e2e8f0; }
+  h1 { font-size: 1.5rem; margin-bottom: 8px; }
+  p  { color: #94a3b8; margin-bottom: 24px; }
+  button { background: #6366f1; color: white; border: none; padding: 12px 28px; border-radius: 8px; font-size: 1rem; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  #status { margin-top: 28px; padding: 16px; border-radius: 8px; display: none; }
+  #status.waiting  { background: #1e293b; border: 1px solid #334155; }
+  #status.success  { background: #14532d; border: 1px solid #16a34a; }
+  #status.error    { background: #450a0a; border: 1px solid #dc2626; }
+  #url-box { word-break: break-all; margin-top: 10px; }
+  a { color: #818cf8; }
+  .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid #475569; border-top-color: #6366f1; border-radius: 50%; animation: spin .8s linear infinite; margin-right: 8px; vertical-align: middle; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<h1>🔐 Claude Satellite — Authentification</h1>
+<p>Connecte ton compte Claude Max pour activer l'assistant vocal.</p>
+<button id="btn" onclick="startLogin()">Démarrer le login OAuth</button>
+<div id="status"></div>
+<script>
+async function startLogin() {
+  const btn = document.getElementById('btn');
+  const box = document.getElementById('status');
+  btn.disabled = true;
+  box.className = 'waiting'; box.style.display = 'block';
+  box.innerHTML = '<span class="spinner"></span> Démarrage…';
+
+  const es = new EventSource('/login/stream');
+  es.onmessage = function(e) {
+    const d = JSON.parse(e.data);
+    if (d.url) {
+      box.innerHTML = '🔗 Ouvre ce lien dans ton navigateur :<br><div id="url-box"><a href="' + d.url + '" target="_blank">' + d.url + '</a></div><br><span class="spinner"></span> En attente de confirmation…';
+    } else if (d.status === 'ok') {
+      es.close();
+      box.className = 'success'; box.innerHTML = '✅ Connecté ! L\'assistant vocal est actif.';
+      btn.textContent = 'Reconnecté ✓'; btn.disabled = false;
+    } else if (d.status === 'error') {
+      es.close();
+      box.className = 'error'; box.innerHTML = '❌ Erreur : ' + d.msg;
+      btn.disabled = false;
+    }
+  };
+  es.onerror = function() {
+    es.close();
+    box.className = 'error'; box.innerHTML = '❌ Connexion perdue.';
+    btn.disabled = false;
+  };
+}
+</script>
+</body>
+</html>"""
+
+
+@app.get("/login", response_class=HTMLResponse)
+async def login_page():
+    return _LOGIN_HTML
+
+
+@app.get("/login/stream")
+async def login_stream():
+    async def generator():
+        env = {**os.environ, "HOME": "/data"}
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "/usr/local/bin/claude", "login",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                env=env,
+            )
+            url_sent = False
+            while True:
+                line = await asyncio.wait_for(proc.stdout.readline(), timeout=120)
+                if not line:
+                    break
+                text = line.decode(errors="replace").strip()
+                log.info("claude login: %s", text)
+                if not url_sent:
+                    m = re.search(r"https://[^\s]+", text)
+                    if m:
+                        url_sent = True
+                        yield f"data: {json.dumps({'url': m.group(0)})}\n\n"
+            await proc.wait()
+            if proc.returncode == 0:
+                yield f"data: {json.dumps({'status': 'ok'})}\n\n"
+            else:
+                yield f"data: {json.dumps({'status': 'error', 'msg': f'exit {proc.returncode}'})}\n\n"
+        except asyncio.TimeoutError:
+            yield f"data: {json.dumps({'status': 'error', 'msg': 'timeout'})}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'status': 'error', 'msg': str(e)})}\n\n"
+
+    return StreamingResponse(generator(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.get("/")
