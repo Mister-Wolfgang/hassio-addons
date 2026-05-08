@@ -188,17 +188,18 @@ class WakeWordWatcher:
             asyncio.ensure_future(self.on_detect(event))
 
     async def _handshake(self, client: WyomingClient):
-        """Attend le info de openWakeWord, puis envoie detect pour activer l'écoute."""
-        # Lire les events initiaux jusqu'à recevoir info
-        for _ in range(5):
-            evt = await asyncio.wait_for(client.recv(), timeout=5)
-            evt_type = evt.get("type")
-            log.debug("[%s] Handshake event: %s", self.stream.camera.name, evt_type)
-            if evt_type == "info":
+        """Envoie describe, récupère info si disponible, puis envoie detect."""
+        # Demander la liste des modèles disponibles
+        await client.send("describe", {})
+        # Attendre info avec un court timeout (certaines versions OWW ne répondent pas)
+        try:
+            evt = await asyncio.wait_for(client.recv(), timeout=2.0)
+            if evt.get("type") == "info":
                 models = evt.get("data", {}).get("wake", [])
                 available = [m.get("name", "") for m in models]
                 log.info("[%s] OWW models disponibles: %s", self.stream.camera.name, available)
-                break
+        except asyncio.TimeoutError:
+            log.info("[%s] OWW: pas de réponse à describe, on continue", self.stream.camera.name)
         # Envoyer detect pour activer la détection
         await client.send("detect", {"names": [self.wake_word]})
         log.info("[%s] detect envoyé pour '%s'", self.stream.camera.name, self.wake_word)
