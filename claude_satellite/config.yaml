@@ -1,6 +1,6 @@
 name: "Claude Satellite"
 
-version: "1.0.58"
+version: "1.0.59"
 
 slug: claude_satellite
 description: "Satellite vocal multi-caméras avec Claude AI — 1 pipeline, toutes les pièces"
