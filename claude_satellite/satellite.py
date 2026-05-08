@@ -296,3 +296,4 @@ class MultiMicSatellite:
                 )
             except Exception as e:
                 log.error("Pipeline error: %s", e, exc_info=True)
+
