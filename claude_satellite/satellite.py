@@ -211,6 +211,8 @@ class WyomingWakeWordDetector:
                 reader_task = asyncio.create_task(
                     self._reader_loop(cam_name, reader), name=f"oww-reader-{cam_name}"
                 )
+                # Attendre un event OWW (run-information) dans les 5 premières secondes
+                asyncio.ensure_future(self._check_oww_response(cam_name, reader_task))
                 try:
                     while not reader_task.done():
                         try:
@@ -245,6 +247,13 @@ class WyomingWakeWordDetector:
         finally:
             stream.unsubscribe(queue)
 
+    async def _check_oww_response(self, cam_name: str, reader_task: asyncio.Task):
+        """Log un warning si OWW n'a rien envoyé dans les 8s après connexion."""
+        await asyncio.sleep(8)
+        if not reader_task.done():
+            log.warning("OWW [%s]: aucun event reçu en 8s — modèle 'hey_jarvis' chargé ? "
+                        "Vérifier les logs du addon OpenWakeWord dans HA.", cam_name)
+
     async def _reader_loop(self, cam_name: str, reader: asyncio.StreamReader):
         """Lit les events OWW pour une caméra."""
         while True:
@@ -261,8 +270,8 @@ class WyomingWakeWordDetector:
                     continue
                 self._last_detect = now
                 score = float(data.get("score", 1.0))
-                log.info("Wake word! cam=%s name=%s score=%.2f rms=%.3f",
-                         cam_name, data.get("name"), score, self.streams[cam_name].rms)
+                log.warning("Wake word! cam=%s name=%s score=%.2f rms=%.3f",
+                            cam_name, data.get("name"), score, self.streams[cam_name].rms)
                 event = WakeEvent(
                     camera=self.streams[cam_name].camera,
                     ww_score=score,
@@ -272,8 +281,11 @@ class WyomingWakeWordDetector:
                     all_rms={n: s.rms for n, s in self.streams.items()},
                 )
                 asyncio.ensure_future(self.on_detect(event))
+            elif evt_type == "run-information":
+                models = [m.get("name", "?") for m in data.get("models", [])]
+                log.warning("OWW [%s]: modèles chargés: %s", cam_name, models)
             else:
-                log.info("OWW [%s]: event=%s data=%s", cam_name, evt_type, data)
+                log.warning("OWW [%s]: event inattendu: %s %s", cam_name, evt_type, data)
 
     async def run(self):
         tasks = [
