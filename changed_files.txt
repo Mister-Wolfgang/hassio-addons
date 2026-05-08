@@ -1,4 +1,1 @@
-claude_satellite/Dockerfile
-claude_satellite/keytar-file.js
-claude_satellite/keytar-preload.js
-claude_satellite/run.sh
+claude_satellite/claude_handle.py
