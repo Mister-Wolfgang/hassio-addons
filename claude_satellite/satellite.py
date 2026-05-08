@@ -78,19 +78,26 @@ class CameraStream:
     def rms(self) -> float:
         return self._rms_buf.rms()
 
+    async def _log_stderr(self, proc):
+        async for line in proc.stderr:
+            txt = line.decode().strip()
+            if txt:
+                log.warning("[%s] FFmpeg: %s", self.camera.name, txt)
+
     async def run(self):
         while True:
             proc = None
             try:
                 proc = await asyncio.create_subprocess_exec(
-                    "ffmpeg", "-loglevel", "quiet",
+                    "ffmpeg", "-loglevel", "warning",
                     "-rtsp_transport", "tcp",
                     "-i", self.camera.rtsp_url,
                     "-vn", "-ar", str(RATE), "-ac", "1",
                     "-f", "s16le", "pipe:1",
                     stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.PIPE,
                 )
+                asyncio.ensure_future(self._log_stderr(proc))
                 while True:
                     data = await proc.stdout.read(CHUNK_BYTES)
                     if not data:
