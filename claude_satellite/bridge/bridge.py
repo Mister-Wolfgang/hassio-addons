@@ -41,8 +41,9 @@ async def ask(req: AskRequest):
     try:
         proc = await asyncio.create_subprocess_exec(
             CLAUDE_BIN,
-            "--system", req.system,
+            "--system-prompt", req.system,
             "--allowedTools", "bash",
+            "--permission-mode", "bypassPermissions",
             "-p", req.prompt,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
