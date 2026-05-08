@@ -1,0 +1,2 @@
+claude_satellite/main.py
+claude_satellite/satellite.py
