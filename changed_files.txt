@@ -1,3 +1,1 @@
-claude_satellite/Dockerfile
-claude_satellite/config.yaml
 claude_satellite/main.py
