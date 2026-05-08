@@ -33,6 +33,8 @@ options:
   wyoming_tts_uri: "tcp://homeassistant:10200"
   wake_word: "hey_jarvis"
   frigate_url: "http://homeassistant:5000"
+  go2rtc_url: "http://homeassistant:1984"
+  go2rtc_rtsp: "rtsp://homeassistant:8554"
   tts_voice: ""
   tts_language: "fr"
   arenti_talk_url: "http://homeassistant:8080"
@@ -44,14 +46,16 @@ schema:
   wyoming_tts_uri: str
   wake_word: str
   frigate_url: str
+  go2rtc_url: str
+  go2rtc_rtsp: str
   tts_voice: "str?"
   tts_language: "str?"
   arenti_talk_url: "str?"
   cameras:
     - name: str
       room: str
-      rtsp_url: str
       frigate_camera: str
       talkback_camera: "str?"
+      rtsp_url: "str?"
 
 watchdog: "http://[HOST]:[PORT:8089]/health"

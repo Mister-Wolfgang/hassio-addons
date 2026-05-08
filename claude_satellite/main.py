@@ -5,6 +5,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
+import httpx
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
@@ -25,21 +26,44 @@ def _load_config() -> dict:
         return json.load(f)
 
 
+async def _resolve_rtsp(camera: dict, go2rtc_url: str, go2rtc_rtsp: str) -> str:
+    """Retourne l'URL RTSP — depuis la config si présente, sinon depuis go2rtc."""
+    if camera.get("rtsp_url"):
+        return camera["rtsp_url"]
+
+    stream_name = camera["frigate_camera"]
+    try:
+        async with httpx.AsyncClient() as c:
+            r = await c.get(f"{go2rtc_url}/api/streams", timeout=5)
+            streams = r.json()
+            if stream_name in streams:
+                url = f"{go2rtc_rtsp}/{stream_name}"
+                log.info("[%s] RTSP auto-découvert : %s", camera["name"], url)
+                return url
+    except Exception as e:
+        log.warning("[%s] go2rtc unavailable: %s", camera["name"], e)
+
+    raise RuntimeError(f"Impossible de trouver l'URL RTSP pour '{stream_name}'. Configurez rtsp_url manuellement.")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _satellite
 
     config = _load_config()
-    cameras = [
-        CameraConfig(
+    go2rtc_url = config.get("go2rtc_url", "http://homeassistant:1984")
+    go2rtc_rtsp = config.get("go2rtc_rtsp", "rtsp://homeassistant:8554")
+
+    cameras = []
+    for c in config.get("cameras", []):
+        rtsp_url = await _resolve_rtsp(c, go2rtc_url, go2rtc_rtsp)
+        cameras.append(CameraConfig(
             name=c["name"],
             room=c["room"],
-            rtsp_url=c["rtsp_url"],
+            rtsp_url=rtsp_url,
             frigate_camera=c["frigate_camera"],
             talkback_camera=c.get("talkback_camera", ""),
-        )
-        for c in config.get("cameras", [])
-    ]
+        ))
 
     if not cameras:
         log.warning("Aucune caméra configurée — satellite inactif")
