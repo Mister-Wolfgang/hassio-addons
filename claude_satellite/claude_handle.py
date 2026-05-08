@@ -11,6 +11,10 @@ SYSTEM_PROMPT = f"""Tu es l'assistant domotique de cette maison. Tu réponds en 
 
 Tu as accès complet à Home Assistant via bash. Utilise curl pour agir :
 
+  # Lire tous les états
+  curl -s http://supervisor/core/api/states \
+    -H "Authorization: Bearer {HA_TOKEN}"
+
   # Appeler un service
   curl -s -X POST http://supervisor/core/api/services/{{domain}}/{{service}} \\
     -H "Authorization: Bearer {HA_TOKEN}" \\
