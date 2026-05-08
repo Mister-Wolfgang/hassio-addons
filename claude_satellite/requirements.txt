@@ -5,5 +5,4 @@ websockets==14.2
 numpy==2.2.5
 pydantic==2.11.4
 aiofiles==24.1.0
-scikit-learn==1.6.1
 openwakeword==0.6.0

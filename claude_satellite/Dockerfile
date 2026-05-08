@@ -4,6 +4,7 @@ FROM ${BUILD_FROM}
 RUN apk add --no-cache \
     ffmpeg \
     gcc \
+    g++ \
     musl-dev \
     nodejs \
     npm \
