@@ -1,0 +1,59 @@
+name: "Claude Satellite"
+
+version: "1.0.0"
+
+slug: claude_satellite
+description: "Satellite vocal multi-caméras avec Claude AI — 1 pipeline, toutes les pièces"
+arch:
+  - aarch64
+  - amd64
+
+startup: application
+boot: auto
+init: false
+
+homeassistant_api: true
+hassio_api: true
+auth_api: true
+
+ports:
+  "8089/tcp": 8089
+ports_description:
+  "8089/tcp": "API Claude Satellite"
+
+ingress: true
+ingress_port: 8089
+ingress_entry: /
+panel_icon: mdi:microphone-ai
+panel_title: "Claude Satellite"
+
+options:
+  wyoming_wake_uri: "tcp://homeassistant:10400"
+  wyoming_stt_uri: "tcp://homeassistant:10300"
+  wyoming_tts_uri: "tcp://homeassistant:10200"
+  wake_word: "hey_jarvis"
+  frigate_url: "http://homeassistant:5000"
+  anthropic_api_key: ""
+  tts_voice: ""
+  tts_language: "fr"
+  arenti_talk_url: "http://homeassistant:8080"
+  cameras: []
+
+schema:
+  wyoming_wake_uri: str
+  wyoming_stt_uri: str
+  wyoming_tts_uri: str
+  wake_word: str
+  frigate_url: str
+  anthropic_api_key: str
+  tts_voice: "str?"
+  tts_language: "str?"
+  arenti_talk_url: "str?"
+  cameras:
+    - name: str
+      room: str
+      rtsp_url: str
+      frigate_camera: str
+      talkback_camera: "str?"
+
+watchdog: "http://[HOST]:[PORT:8089]/health"
