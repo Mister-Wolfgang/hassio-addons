@@ -254,14 +254,20 @@ class MultiMicSatellite:
         tasks = []
         for name, stream in self.streams.items():
             tasks.append(asyncio.create_task(stream.run(), name=f"stream-{name}"))
+
+        # TEST: une seule connexion OWW sur la première caméra pour vérifier que
+        # la détection fonctionne. Si ça marche → on passe en mixing multi-cam.
+        if self.streams:
+            first_stream = next(iter(self.streams.values()))
             watcher = WakeWordWatcher(
-                stream=stream,
+                stream=first_stream,
                 wake_uri=self.config["wyoming_wake_uri"],
                 wake_word=self.config["wake_word"],
                 on_detect=self._on_wake,
                 all_streams=self.streams,
             )
-            tasks.append(asyncio.create_task(watcher.run(), name=f"watcher-{name}"))
+            tasks.append(asyncio.create_task(watcher.run(), name="watcher-single"))
+            log.info("WakeWord: connexion unique OWW sur '%s' (test)", first_stream.camera.name)
 
         log.info("MultiMicSatellite ready — %d cameras", len(self.cameras))
         await asyncio.gather(*tasks)
