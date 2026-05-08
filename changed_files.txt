@@ -1,2 +1,2 @@
 claude_satellite/claude_handle.py
-claude_satellite/pipeline.py
+claude_satellite/main.py
