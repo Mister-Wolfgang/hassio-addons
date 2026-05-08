@@ -23,6 +23,66 @@ _satellite: MultiMicSatellite | None = None
 _login_pty_fd: int | None = None  # master_fd du PTY de login en cours
 
 
+class ClaudeSession:
+    """Process claude interactif gardé en vie après login — token en RAM."""
+
+    def __init__(self, master_fd: int, proc):
+        self.master_fd = master_fd
+        self.proc = proc
+        self._lock = asyncio.Lock()
+
+    def is_alive(self) -> bool:
+        return self.proc.poll() is None
+
+    async def query(self, prompt: str, timeout: float = 90.0) -> str:
+        """Envoie un prompt au PTY, retourne le texte RÉPONSE_VOCALE."""
+        async with self._lock:
+            return await self._do_query(prompt, timeout)
+
+    async def _do_query(self, prompt: str, timeout: float) -> str:
+        import select as _sel
+        # Bracketed paste pour envoyer du texte multi-ligne sans que le TUI
+        # n'interprète chaque \n comme "Envoyer".
+        payload = b"\x1b[200~" + prompt.encode("utf-8") + b"\x1b[201~\r"
+        try:
+            os.write(self.master_fd, payload)
+        except OSError as e:
+            log.error("ClaudeSession write error: %s", e)
+            return ""
+
+        buf = ""
+        deadline = asyncio.get_event_loop().time() + timeout
+        while asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.05)
+            r, _, _ = _sel.select([self.master_fd], [], [], 0)
+            if not r:
+                continue
+            try:
+                chunk = os.read(self.master_fd, 4096).decode("utf-8", errors="replace")
+            except OSError:
+                break
+            clean = re.sub(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])", "", chunk)
+            clean = re.sub(r"[\x00-\x1f\x7f]", " ", clean)
+            buf += clean
+            m = re.search(r"RÉPONSE_VOCALE\s*:\s*(.+)", buf, re.IGNORECASE)
+            if m:
+                log.info("ClaudeSession réponse: %r", m.group(1).strip())
+                return m.group(1).strip()
+        log.warning("ClaudeSession timeout après %.0fs", timeout)
+        return ""
+
+    def close(self):
+        try:
+            os.close(self.master_fd)
+        except OSError:
+            pass
+        if self.proc.poll() is None:
+            self.proc.terminate()
+
+
+_claude_session: ClaudeSession | None = None
+
+
 def _load_config() -> dict:
     with open(OPTIONS_PATH) as f:
         return json.load(f)
@@ -239,7 +299,12 @@ async def login_stream():
         import select
         import subprocess
 
-        global _login_pty_fd
+        global _login_pty_fd, _claude_session
+        # Fermer une session existante avant d'en ouvrir une nouvelle
+        if _claude_session:
+            _claude_session.close()
+            _claude_session = None
+
         env = {**os.environ, "HOME": "/data"}
         master_fd, slave_fd = pty.openpty()
         _login_pty_fd = master_fd
@@ -316,13 +381,13 @@ async def login_stream():
                                         "claude >", "claude>",
                                         "*" * 20)  # animation de validation OAuth
                     if any(p in low for p in success_patterns):
-                        log.info("login: succès détecté — attente écriture credentials")
+                        log.info("login: succès — session claude conservée en mémoire")
                         login_ok = True
                         key_task.cancel()
-                        await asyncio.sleep(4)  # laisser claude écrire le token sur disque
-                        proc.terminate()
+                        await asyncio.sleep(2)  # laisser claude atteindre le prompt
+                        _claude_session = ClaudeSession(master_fd, proc)
                         yield f"data: {json.dumps({'status': 'ok'})}\n\n"
-                        return
+                        return  # proc et master_fd restent ouverts (session persistante)
 
             key_task.cancel()
             if login_ok or proc.returncode == 0:
@@ -334,12 +399,14 @@ async def login_stream():
             yield f"data: {json.dumps({'status': 'error', 'msg': str(e)})}\n\n"
         finally:
             _login_pty_fd = None
-            try:
-                os.close(master_fd)
-            except OSError:
-                pass
-            if proc and proc.poll() is None:
-                proc.terminate()
+            # Ne fermer que si le login a échoué (succès = session persistante)
+            if not login_ok:
+                try:
+                    os.close(master_fd)
+                except OSError:
+                    pass
+                if proc and proc.poll() is None:
+                    proc.terminate()
 
     return StreamingResponse(generator(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

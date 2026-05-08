@@ -1,15 +1,11 @@
-"""Appel Claude Code CLI (compte Max) directement dans le container addon."""
-import asyncio
+"""Appel Claude via la session interactive persistante (token en RAM)."""
 import json
 import logging
 import os
-import re
 
 log = logging.getLogger(__name__)
 
-HA_URL = "http://supervisor/core"
 HA_TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
-CLAUDE_BIN = "/usr/local/bin/claude"
 
 SYSTEM_PROMPT = f"""Tu es l'assistant domotique de cette maison. Tu réponds en français, de façon concise (réponse vocale TTS).
 
@@ -48,7 +44,9 @@ def _build_prompt(transcript: str, context: dict) -> str:
         for s in context.get("ha_states", [])
     )
 
-    return f"""## Caméras / Pièces
+    return f"""{SYSTEM_PROMPT}
+
+## Caméras / Pièces
 {cameras_lines}
 
 ## Signaux audio au moment du wake word
@@ -69,63 +67,12 @@ Identifie qui a parlé et depuis quelle pièce, puis réponds et agis sur HA si 
 
 
 async def handle(transcript: str, context: dict, **_) -> str:
-    """Appelle claude CLI dans le container, retourne le texte TTS."""
+    """Route la commande vers la session Claude persistante."""
+    from main import _claude_session  # import tardif pour éviter les cycles
+
+    if _claude_session is None or not _claude_session.is_alive():
+        log.error("Aucune session Claude active — connectez-vous via /login")
+        return ""
+
     prompt = _build_prompt(transcript, context)
-
-    # Debug: inspecter l'environnement et les fichiers credentials
-    import pathlib, json as _json, subprocess as _sp
-    log.info("NODE_OPTIONS=%r  HOME=%r", os.environ.get("NODE_OPTIONS"), os.environ.get("HOME"))
-    log.info(".claude-keytar.json exists: %s", pathlib.Path("/data/.claude-keytar.json").exists())
-    # Inspecter le binaire claude (shell script vs compiled)
-    try:
-        head = open(CLAUDE_BIN, "rb").read(256)
-        log.info("claude binary head: %s", repr(head[:80]))
-    except Exception as e:
-        log.info("claude binary read error: %s", e)
-    # Scanner tous les fichiers modifiés dans /data depuis 30min
-    try:
-        out = _sp.check_output(["find", "/data", "-newer", "/tmp", "-type", "f"],
-                                stderr=_sp.DEVNULL, timeout=3).decode()
-        log.info("recent /data files: %s", out.strip()[:400])
-    except Exception:
-        pass
-
-    env = {
-        **os.environ,
-        "HOME": "/data",  # credentials dans /data/.claude/ — persiste entre redémarrages
-    }
-
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            CLAUDE_BIN,
-            "--output-format", "text",
-            "--system-prompt", SYSTEM_PROMPT,
-            "--allowedTools", "bash",
-            "-p", prompt,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
-    except asyncio.TimeoutError:
-        proc.kill()
-        log.error("claude timeout")
-        return ""
-    except Exception as e:
-        log.error("claude exec error: %s", e)
-        return ""
-
-    if proc.returncode != 0:
-        log.error("claude exit %d\nSTDERR: %s\nSTDOUT: %s",
-                  proc.returncode, stderr.decode()[:500], stdout.decode()[:500])
-        return ""
-
-    output = stdout.decode()
-    log.debug("claude output: %s", output[:500])
-
-    match = re.search(r"RÉPONSE_VOCALE\s*:\s*(.+)", output, re.IGNORECASE)
-    if match:
-        return match.group(1).strip()
-
-    lines = [l.strip() for l in output.splitlines() if l.strip()]
-    return lines[-1] if lines else ""
+    return await _claude_session.query(prompt)
