@@ -198,21 +198,25 @@ class WakeWordWatcher:
             asyncio.ensure_future(self.on_detect(event))
 
     async def _handshake(self, client: WyomingClient):
-        """Envoie describe, récupère info si disponible, puis envoie detect."""
-        # Demander la liste des modèles disponibles
-        await client.send("describe", {})
-        # Attendre info avec un court timeout (certaines versions OWW ne répondent pas)
+        """Attend l'info proactif d'OWW (comme HA satellite), puis envoie detect."""
+        # OWW pousse info proactivement à la connexion — on lit les events jusqu'à l'obtenir
         try:
-            evt = await asyncio.wait_for(client.recv(), timeout=2.0)
-            if evt.get("type") == "info":
-                models = evt.get("data", {}).get("wake", [])
-                available = [m.get("name", "") for m in models]
-                log.info("[%s] OWW models disponibles: %s", self.stream.camera.name, available)
+            for _ in range(3):
+                evt = await asyncio.wait_for(client.recv(), timeout=3.0)
+                evt_type = evt.get("type")
+                log.info("[%s] OWW init event: %s | %s", self.stream.camera.name, evt_type, evt.get("data"))
+                if evt_type == "info":
+                    # Afficher les modèles disponibles (structure: wake[].models[].name)
+                    wake_programs = evt.get("data", {}).get("wake", [])
+                    for prog in wake_programs:
+                        models = [m.get("name") for m in prog.get("models", [])]
+                        log.info("[%s] OWW programme '%s' models: %s", self.stream.camera.name, prog.get("name"), models)
+                    break
         except asyncio.TimeoutError:
-            log.info("[%s] OWW: pas de réponse à describe, on continue", self.stream.camera.name)
-        # Envoyer detect sans filtre de nom = activer TOUS les modèles chargés
-        await client.send("detect", {})
-        log.info("[%s] detect envoyé (tous modèles)", self.stream.camera.name)
+            log.info("[%s] OWW: pas d'info initial reçu, on continue quand même", self.stream.camera.name)
+        # Envoyer detect avec le nom configuré
+        await client.send("detect", {"names": [self.wake_word]})
+        log.info("[%s] detect envoyé pour '%s'", self.stream.camera.name, self.wake_word)
 
     async def run(self):
         while True:
