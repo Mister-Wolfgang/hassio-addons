@@ -145,6 +145,7 @@ class WakeWordWatcher:
 
     async def _send_audio(self, client: WyomingClient, audio_q: asyncio.Queue):
         await client.send("audio-start", {"rate": RATE, "width": WIDTH, "channels": CHANNELS})
+        n = 0
         while True:
             chunk = await audio_q.get()
             await client.send(
@@ -152,28 +153,33 @@ class WakeWordWatcher:
                 {"rate": RATE, "width": WIDTH, "channels": CHANNELS},
                 payload=chunk,
             )
+            n += 1
+            if n % 100 == 0:  # toutes les ~10s
+                log.info("[%s] Audio→OWW: %d chunks, rms=%.4f", self.stream.camera.name, n, self.stream.rms)
 
     async def _recv_detections(self, client: WyomingClient):
         while True:
             evt = await client.recv()
             evt_type = evt.get("type")
+            # Log ALL events from OWW for diagnosis
+            log.info("[%s] OWW← %s | %s", self.stream.camera.name, evt_type, evt.get("data"))
+
             if evt_type != "detection":
-                log.debug("[%s] OWW event: %s", self.stream.camera.name, evt_type)
                 continue
 
             data = evt.get("data", {})
             name = str(data.get("name", "")).lower()
             score = float(data.get("score", 1.0))
 
-            log.debug("[%s] Detection: name=%s score=%.2f", self.stream.camera.name, name, score)
-
-            if self.wake_word not in name:
-                continue
-
             now = time.monotonic()
             if now - self._last_detect < PIPELINE_DEBOUNCE_S:
+                log.info("[%s] Detection ignorée (debounce): name=%s", self.stream.camera.name, name)
                 continue
             self._last_detect = now
+
+            if self.wake_word not in name:
+                log.info("[%s] Detection ignorée (nom=%s, attendu=%s)", self.stream.camera.name, name, self.wake_word)
+                continue
 
             log.info("[%s] Wake word! score=%.2f rms=%.3f", self.stream.camera.name, score, self.stream.rms)
 
@@ -200,9 +206,9 @@ class WakeWordWatcher:
                 log.info("[%s] OWW models disponibles: %s", self.stream.camera.name, available)
         except asyncio.TimeoutError:
             log.info("[%s] OWW: pas de réponse à describe, on continue", self.stream.camera.name)
-        # Envoyer detect pour activer la détection
-        await client.send("detect", {"names": [self.wake_word]})
-        log.info("[%s] detect envoyé pour '%s'", self.stream.camera.name, self.wake_word)
+        # Envoyer detect sans filtre de nom = activer TOUS les modèles chargés
+        await client.send("detect", {})
+        log.info("[%s] detect envoyé (tous modèles)", self.stream.camera.name)
 
     async def run(self):
         while True:
