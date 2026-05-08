@@ -1,7 +1,8 @@
 """Multi-mic satellite: surveille tous les streams caméras pour le wake word."""
 import asyncio
-import concurrent.futures
+import json
 import logging
+import struct
 import time
 from dataclasses import dataclass, field
 
@@ -124,92 +125,148 @@ class CameraStream:
             await asyncio.sleep(3)
 
 
-class LocalWakeWordDetector:
-    """Détection de wake word locale via openwakeword Python lib (sans Wyoming)."""
+def _wyoming_encode(event_type: str, data: dict, payload: bytes = b"") -> bytes:
+    """Encode un event Wyoming: header JSON + payload binaire."""
+    header = json.dumps({"type": event_type, "data": data, "payload_length": len(payload)}) + "\n"
+    return header.encode() + payload
 
-    OWW_CHUNK = 1280  # 80ms à 16000Hz — taille standard openwakeword
 
-    def __init__(self, streams: dict[str, "CameraStream"], wake_word: str, on_detect, threshold: float = 0.5):
+async def _wyoming_read_event(reader: asyncio.StreamReader) -> tuple[str, dict, bytes]:
+    """Lit un event Wyoming depuis un StreamReader."""
+    line = await reader.readline()
+    header = json.loads(line)
+    payload = b""
+    if header.get("payload_length", 0) > 0:
+        payload = await reader.readexactly(header["payload_length"])
+    return header["type"], header.get("data", {}), payload
+
+
+class WyomingWakeWordDetector:
+    """Détection de wake word via Wyoming openWakeWord (core-openwakeword:10400)."""
+
+    CHUNK_MS = 100
+    CHUNK_BYTES = int(RATE * WIDTH * CHANNELS * CHUNK_MS / 1000)  # 3200 bytes / chunk
+
+    def __init__(self, streams: dict[str, "CameraStream"], wyoming_uri: str, on_detect, debounce: float = PIPELINE_DEBOUNCE_S):
         self.streams = streams
-        self.wake_word = wake_word.lower()
+        # wyoming_uri: "tcp://core-openwakeword:10400"
+        host, port = wyoming_uri.replace("tcp://", "").split(":")
+        self.host = host
+        self.port = int(port)
         self.on_detect = on_detect
-        self.threshold = threshold
+        self.debounce = debounce
         self._last_detect = 0.0
 
+    async def _connect(self):
+        """Ouvre une connexion TCP au service Wyoming OWW."""
+        reader, writer = await asyncio.open_connection(self.host, self.port)
+        # Envoie audio-start
+        writer.write(_wyoming_encode("audio-start", {
+            "rate": RATE, "width": WIDTH, "channels": CHANNELS,
+        }))
+        await writer.drain()
+        log.info("Wyoming OWW: connecté à %s:%d", self.host, self.port)
+        return reader, writer
+
     async def run(self):
-        from openwakeword.model import Model
-
-        loop = asyncio.get_event_loop()
-        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-
-        log.info("LocalWakeWord: chargement modèle '%s'...", self.wake_word)
-        model = await loop.run_in_executor(executor, lambda: Model(wakeword_models=[self.wake_word]))
-        log.info("LocalWakeWord: modèle '%s' prêt ✓", self.wake_word)
-
+        # Abonne toutes les caméras
         queues = {name: stream.subscribe() for name, stream in self.streams.items()}
+        # Un buffer par caméra pour accumuler les chunks RTSP
         buffers: dict[str, bytearray] = {name: bytearray() for name in self.streams}
-        n_chunks = 0
+        n_sent = 0
+
+        reader, writer = None, None
 
         try:
             while True:
+                # (Re)connexion si nécessaire
+                if writer is None or writer.is_closing():
+                    try:
+                        reader, writer = await self._connect()
+                    except Exception as e:
+                        log.error("Wyoming OWW: connexion impossible: %s — retry 5s", e)
+                        await asyncio.sleep(5)
+                        continue
+
                 # Drainer toutes les queues dans les buffers
-                got = False
                 for name, q in queues.items():
                     while True:
                         try:
                             buffers[name].extend(q.get_nowait())
-                            got = True
                         except asyncio.QueueEmpty:
                             break
 
-                # Trouver la caméra avec le plus de données et la plus forte RMS
-                ready = [n for n, b in buffers.items() if len(b) >= self.OWW_CHUNK * 2]
+                # Sélectionner la caméra la plus active (RMS max) avec assez de données
+                ready = [n for n, b in buffers.items() if len(b) >= self.CHUNK_BYTES]
                 if not ready:
-                    await asyncio.sleep(0.02)
+                    await asyncio.sleep(0.01)
                     continue
 
                 src = max(ready, key=lambda n: self.streams[n].rms)
-                audio_bytes = bytes(buffers[src][:self.OWW_CHUNK * 2])
-                del buffers[src][:self.OWW_CHUNK * 2]
+                chunk = bytes(buffers[src][:self.CHUNK_BYTES])
+                del buffers[src][:self.CHUNK_BYTES]
 
-                audio = np.frombuffer(audio_bytes, dtype=np.int16)
-                predictions = await loop.run_in_executor(executor, model.predict, audio)
+                try:
+                    writer.write(_wyoming_encode("audio-chunk", {
+                        "rate": RATE, "width": WIDTH, "channels": CHANNELS,
+                        "timestamp": int(time.monotonic() * 1000),
+                    }, chunk))
+                    await writer.drain()
+                except Exception as e:
+                    log.warning("Wyoming OWW: write error: %s", e)
+                    writer = None
+                    continue
 
-                n_chunks += 1
-                if n_chunks % 125 == 0:  # ~10s
-                    scores = {k: f"{v:.3f}" for k, v in predictions.items()}
-                    log.info("LocalWW: src=%s rms=%.4f scores=%s", src, self.streams[src].rms, scores)
+                n_sent += 1
+                if n_sent % 100 == 0:
+                    rms = {n: f"{s.rms:.4f}" for n, s in self.streams.items()}
+                    log.info("Wyoming OWW: src=%s rms=%s chunks=%d", src, rms, n_sent)
 
-                for ww_name, score in predictions.items():
-                    score = float(score)
-                    if score < self.threshold:
-                        continue
-                    now = time.monotonic()
-                    if now - self._last_detect < PIPELINE_DEBOUNCE_S:
-                        continue
-                    self._last_detect = now
+                # Lire les events disponibles (non-bloquant)
+                try:
+                    while True:
+                        line = await asyncio.wait_for(reader.readline(), timeout=0.001)
+                        if not line:
+                            break
+                        header = json.loads(line)
+                        evt_type = header.get("type", "")
+                        payload_len = header.get("payload_length", 0)
+                        if payload_len > 0:
+                            await reader.readexactly(payload_len)
 
-                    best = max(self.streams, key=lambda n: self.streams[n].rms)
-                    best_stream = self.streams[best]
-                    log.info("Wake word! name=%s score=%.2f source=%s rms=%.3f",
-                             ww_name, score, best, best_stream.rms)
+                        if evt_type == "detection":
+                            data = header.get("data", {})
+                            now = time.monotonic()
+                            if now - self._last_detect < self.debounce:
+                                continue
+                            self._last_detect = now
+                            best = max(self.streams, key=lambda n: self.streams[n].rms)
+                            best_stream = self.streams[best]
+                            log.info("Wake word! name=%s score=%.2f src=%s rms=%.3f",
+                                     data.get("name"), data.get("score", 1.0), best, best_stream.rms)
+                            event = WakeEvent(
+                                camera=best_stream.camera,
+                                ww_score=float(data.get("score", 1.0)),
+                                rms=best_stream.rms,
+                                timestamp=now,
+                                all_scores={best: float(data.get("score", 1.0))},
+                                all_rms={n: s.rms for n, s in self.streams.items()},
+                            )
+                            asyncio.ensure_future(self.on_detect(event))
 
-                    event = WakeEvent(
-                        camera=best_stream.camera,
-                        ww_score=score,
-                        rms=best_stream.rms,
-                        timestamp=now,
-                        all_scores={best: score},
-                        all_rms={n: s.rms for n, s in self.streams.items()},
-                    )
-                    asyncio.ensure_future(self.on_detect(event))
+                except asyncio.TimeoutError:
+                    pass
+                except Exception as e:
+                    log.warning("Wyoming OWW: read error: %s", e)
+                    writer = None
 
         except Exception as e:
-            log.error("LocalWakeWord error: %s", e, exc_info=True)
+            log.error("WyomingWakeWord error: %s", e, exc_info=True)
         finally:
             for name, q in queues.items():
                 self.streams[name].unsubscribe(q)
-            executor.shutdown(wait=False)
+            if writer and not writer.is_closing():
+                writer.close()
 
 
 class MultiMicSatellite:
@@ -229,13 +286,12 @@ class MultiMicSatellite:
         for name, stream in self.streams.items():
             tasks.append(asyncio.create_task(stream.run(), name=f"stream-{name}"))
 
-        detector = LocalWakeWordDetector(
+        detector = WyomingWakeWordDetector(
             streams=self.streams,
-            wake_word=self.config["wake_word"],
+            wyoming_uri=self.config.get("wyoming_wake_uri", "tcp://core-openwakeword:10400"),
             on_detect=self._on_wake,
-            threshold=float(self.config.get("wake_word_threshold", 0.5)),
         )
-        tasks.append(asyncio.create_task(detector.run(), name="local-wakeword"))
+        tasks.append(asyncio.create_task(detector.run(), name="wyoming-wakeword"))
 
         log.info("MultiMicSatellite ready — %d cameras", len(self.cameras))
         await asyncio.gather(*tasks)

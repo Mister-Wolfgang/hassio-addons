@@ -30,8 +30,8 @@ panel_title: "Claude Satellite"
 options:
   wyoming_stt_uri: "tcp://core-whisper:10300"
   wyoming_tts_uri: "tcp://core-piper:10200"
+  wyoming_wake_uri: "tcp://core-openwakeword:10400"
   wake_word: "hey_jarvis"
-  wake_word_threshold: 0.5
   frigate_url: "http://homeassistant:5000"
   go2rtc_url: "http://homeassistant:1984"
   go2rtc_rtsp: "rtsp://homeassistant:8554"
@@ -43,8 +43,8 @@ options:
 schema:
   wyoming_stt_uri: str
   wyoming_tts_uri: str
+  wyoming_wake_uri: str
   wake_word: str
-  wake_word_threshold: float
   frigate_url: str
   go2rtc_url: str
   go2rtc_rtsp: str
