@@ -232,7 +232,6 @@ async def login_stream():
         import pty
         import select
         import subprocess
-        import signal
 
         env = {**os.environ, "HOME": "/data"}
         master_fd, slave_fd = pty.openpty()
@@ -245,13 +244,28 @@ async def login_stream():
             )
             os.close(slave_fd)
 
+            # Navigue automatiquement à travers l'onboarding puis déclenche /login
+            async def send_keys():
+                await asyncio.sleep(1.5)
+                os.write(master_fd, b"\n")      # Accepte le thème par défaut
+                await asyncio.sleep(0.8)
+                os.write(master_fd, b"\n")      # Éventuel autre écran setup
+                await asyncio.sleep(0.8)
+                os.write(master_fd, b"\n")      # Idem
+                await asyncio.sleep(0.6)
+                os.write(master_fd, b"/login\n") # Déclenche l'OAuth
+
+            key_task = asyncio.create_task(send_keys())
+
             buf = ""
             url_sent = False
+            login_ok = False
             deadline = asyncio.get_event_loop().time() + 180
 
             while proc.poll() is None:
                 await asyncio.sleep(0.05)
                 if asyncio.get_event_loop().time() > deadline:
+                    key_task.cancel()
                     proc.terminate()
                     yield f"data: {json.dumps({'status': 'error', 'msg': 'timeout'})}\n\n"
                     return
@@ -263,19 +277,29 @@ async def login_stream():
                     chunk = os.read(master_fd, 4096).decode("utf-8", errors="replace")
                 except OSError:
                     break
-                # Strip ANSI escape codes
+
                 clean = re.sub(r"\x1b\[[0-9;]*[mABCDHfJKST]|\x1b\].*?\x07|\r", "", chunk)
                 buf += clean
-                log.info("claude pty: %s", clean.strip()[:200])
+                log.info("claude pty: %s", repr(clean.strip()[:120]))
 
                 if not url_sent:
                     m = re.search(r"https://[^\s\x00-\x1f]+", buf)
                     if m:
                         url_sent = True
-                        yield f"data: {json.dumps({'url': m.group(0)})}\n\n"
+                        yield f"data: {json.dumps({'url': m.group(0).rstrip('.')})}\n\n"
 
-            proc.wait()
-            if proc.returncode == 0:
+                # Détecte le succès du login dans le texte
+                if url_sent and not login_ok:
+                    low = buf.lower()
+                    if any(p in low for p in ("logged in", "authenticated", "welcome back", "connecté", "succès")):
+                        login_ok = True
+                        key_task.cancel()
+                        proc.terminate()
+                        yield f"data: {json.dumps({'status': 'ok'})}\n\n"
+                        return
+
+            key_task.cancel()
+            if login_ok or proc.returncode == 0:
                 yield f"data: {json.dumps({'status': 'ok'})}\n\n"
             else:
                 yield f"data: {json.dumps({'status': 'error', 'msg': f'exit {proc.returncode}'})}\n\n"
