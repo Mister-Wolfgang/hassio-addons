@@ -1,2 +1,4 @@
 claude_satellite/Dockerfile
+claude_satellite/config.yaml
 claude_satellite/requirements.txt
+claude_satellite/satellite.py
