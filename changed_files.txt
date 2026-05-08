@@ -1,5 +1,2 @@
-claude_satellite/claude_handle.py
-claude_satellite/keytar-file.js
-claude_satellite/keytar-preload.js
 claude_satellite/main.py
-claude_satellite/run.sh
+claude_satellite/satellite.py
