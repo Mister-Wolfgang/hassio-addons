@@ -73,17 +73,18 @@ async def handle(transcript: str, context: dict, **_) -> str:
     prompt = _build_prompt(transcript, context)
 
     # Debug: vérifier où sont les credentials
-    import pathlib
-    for p in ("/data/.claude", "/data/.claude.json", "/root/.claude", "/root/.claude.json"):
+    import pathlib, json as _json
+    for p in ("/data/.claude.json", "/root/.claude.json"):
         pp = pathlib.Path(p)
         if pp.exists():
-            if pp.is_dir():
-                files = [str(f.name) for f in pp.iterdir()]
-                log.info("credentials dir %s: %s", p, files)
-            else:
-                log.info("credentials file %s: %d bytes", p, pp.stat().st_size)
-        else:
-            log.info("credentials path missing: %s", p)
+            try:
+                content = _json.loads(pp.read_text())
+                log.info("%s keys: %s", p, list(content.keys()))
+            except Exception:
+                log.info("%s raw: %s", p, pp.read_text()[:300])
+    sessions_dir = pathlib.Path("/data/.claude/sessions")
+    if sessions_dir.exists():
+        log.info("sessions/: %s", [f.name for f in sessions_dir.iterdir()])
 
     env = {
         **os.environ,
