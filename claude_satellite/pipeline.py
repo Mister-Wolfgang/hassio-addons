@@ -155,9 +155,9 @@ async def run_full_pipeline(wake_event, streams: dict, config: dict):
         rms_values=wake_event.all_rms,
     )
 
-    # 4. Claude
-    log.info("[Pipeline] Appel Claude...")
-    response_text = await handle(transcript, context)
+    # 4. Claude via bridge
+    log.info("[Pipeline] Appel Claude bridge...")
+    response_text = await handle(transcript, context, config.get("claude_bridge_url", "http://172.30.32.2:9099"))
     log.info("[Pipeline] Réponse: %r", response_text)
     if not response_text:
         return

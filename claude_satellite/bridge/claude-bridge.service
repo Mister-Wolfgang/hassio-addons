@@ -1,0 +1,16 @@
+[Unit]
+Description=Claude Bridge — HTTP wrapper pour claude CLI
+After=network.target
+
+[Service]
+Type=simple
+User=wolfgang
+WorkingDirectory=/opt/claude-bridge
+ExecStart=/opt/claude-bridge/venv/bin/python bridge.py
+Restart=always
+RestartSec=5
+Environment=CLAUDE_BIN=/home/wolfgang/.local/bin/claude
+Environment=BRIDGE_PORT=9099
+
+[Install]
+WantedBy=multi-user.target
