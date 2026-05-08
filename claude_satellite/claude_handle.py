@@ -1,5 +1,4 @@
 """Appel Claude via la session interactive persistante (token en RAM)."""
-import json
 import logging
 import os
 
@@ -11,21 +10,15 @@ SYSTEM_PROMPT = f"""Tu es l'assistant domotique de cette maison. Tu réponds en 
 
 Tu as accès complet à Home Assistant via bash. Utilise curl pour agir :
 
-  # Lire tous les états
-  curl -s http://supervisor/core/api/states \
+  curl -s http://supervisor/core/api/states \\
     -H "Authorization: Bearer {HA_TOKEN}"
 
-  # Appeler un service
   curl -s -X POST http://supervisor/core/api/services/{{domain}}/{{service}} \\
     -H "Authorization: Bearer {HA_TOKEN}" \\
     -H "Content-Type: application/json" \\
     -d '{{"entity_id": "light.salon"}}'
 
-  # Lire un état précis
-  curl -s http://supervisor/core/api/states/light.salon \\
-    -H "Authorization: Bearer {HA_TOKEN}"
-
-RÈGLE ABSOLUE : termine TOUJOURS ta réponse par exactement cette ligne (même pour les questions, même si tu n'agis pas) :
+RÈGLE ABSOLUE : termine TOUJOURS ta réponse par exactement cette ligne :
 RÉPONSE_VOCALE: <texte court en français à lire à voix haute>
 """
 
@@ -35,13 +28,8 @@ def _build_prompt(transcript: str, context: dict) -> str:
         f"  - {c['name']} → pièce: {c['room']}" for c in context.get("cameras", [])
     )
     scores_lines = "\n".join(
-        f"  - {cam}: wake_word_score={score:.2f}  rms={context['rms_values'].get(cam, 0):.3f}"
+        f"  - {cam}: rms={context['rms_values'].get(cam, 0):.3f}"
         for cam, score in context.get("ww_scores", {}).items()
-    )
-    events_json = json.dumps(context.get("frigate_events", []), ensure_ascii=False, indent=2)
-    states_lines = "\n".join(
-        f"  {s['entity_id']}: {s['state']}"
-        for s in context.get("ha_states", [])
     )
 
     return f"""{SYSTEM_PROMPT}
@@ -49,20 +37,11 @@ def _build_prompt(transcript: str, context: dict) -> str:
 ## Caméras / Pièces
 {cameras_lines}
 
-## Signaux audio au moment du wake word
-(score élevé + rms élevé = personne proche de cette caméra)
+## Niveau audio au wake word (rms élevé = personne proche)
 {scores_lines}
 
-## Événements Frigate (30 dernières secondes)
-{events_json}
-
-## États Home Assistant actuels
-{states_lines}
-
 ---
-Commande vocale reçue : "{transcript}"
-
-Identifie qui a parlé et depuis quelle pièce, puis réponds et agis sur HA si nécessaire.
+Commande vocale : "{transcript}"
 """
 
 
