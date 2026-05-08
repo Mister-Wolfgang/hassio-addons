@@ -89,6 +89,38 @@ _claude_session: ClaudeSession | None = None
 _auto_start_task: asyncio.Task | None = None
 
 
+async def _dismiss_setup_screens(master_fd: int, timeout: float = 12.0) -> int:
+    """Envoie Enter pour chaque écran 'Press Enter to continue' jusqu'au prompt interactif.
+    Retourne le nombre d'octets drainés."""
+    import select as _sel
+    buf = ""
+    drained = 0
+    deadline = asyncio.get_event_loop().time() + timeout
+    last_enter = 0.0
+    while asyncio.get_event_loop().time() < deadline:
+        await asyncio.sleep(0.05)
+        r, _, _ = _sel.select([master_fd], [], [], 0)
+        if r:
+            try:
+                chunk = os.read(master_fd, 8192)
+                drained += len(chunk)
+                text = re.sub(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])", "", chunk.decode("utf-8", errors="replace"))
+                text = re.sub(r"[\x00-\x1f\x7f]", "", text)
+                buf += text
+            except OSError:
+                break
+        # Envoyer Enter pour chaque écran "Press Enter to continue"
+        if "press enter to continue" in buf.lower():
+            now = asyncio.get_event_loop().time()
+            if now - last_enter > 0.8:
+                os.write(master_fd, b"\r")
+                last_enter = now
+                buf = ""  # reset pour détecter le prochain écran
+        elif asyncio.get_event_loop().time() - last_enter > 3.0 and last_enter > 0:
+            break  # plus d'écran depuis 3s → on est au prompt
+    return drained
+
+
 async def _auto_start_claude():
     """Démarre automatiquement la session Claude au startup (keyring requis)."""
     global _claude_session
@@ -142,18 +174,7 @@ async def _auto_start_claude():
             if "*" * 20 in buf or any(p in buf.lower() for p in
                                        ("login successful", "logged in", "claude >", "claude>")):
                 login_ok = True
-                os.write(master_fd, b"\r")  # "Press Enter to continue"
-                await asyncio.sleep(2)
-                drained = 0
-                while True:
-                    r2, _, _ = _sel.select([master_fd], [], [], 0.1)
-                    if not r2:
-                        break
-                    try:
-                        chunk2 = os.read(master_fd, 8192)
-                        drained += len(chunk2)
-                    except OSError:
-                        break
+                drained = await _dismiss_setup_screens(master_fd)
                 _claude_session = ClaudeSession(master_fd, proc)
                 log.info("Auto-démarrage réussi — session Claude active (%d octets drainés)", drained)
                 return
@@ -475,23 +496,8 @@ async def login_stream():
                                  "existant" if not url_sent else "nouveau")
                         login_ok = True
                         key_task.cancel()
-                        await asyncio.sleep(1)
-                        # Valider l'écran "Login successful. Press Enter to continue…"
-                        os.write(master_fd, b"\r")
-                        await asyncio.sleep(2)  # laisser claude charger le prompt interactif
-                        # Vider le buffer PTY (écrans d'onboarding résiduels)
-                        import select as _sel2
-                        drained = 0
-                        while True:
-                            r2, _, _ = _sel2.select([master_fd], [], [], 0.1)
-                            if not r2:
-                                break
-                            try:
-                                chunk2 = os.read(master_fd, 8192)
-                                drained += len(chunk2)
-                            except OSError:
-                                break
-                        log.info("login: PTY drainé (%d octets résiduels)", drained)
+                        drained = await _dismiss_setup_screens(master_fd)
+                        log.info("login: prêt (%d octets drainés)", drained)
                         _claude_session = ClaudeSession(master_fd, proc)
                         yield f"data: {json.dumps({'status': 'ok'})}\n\n"
                         return
