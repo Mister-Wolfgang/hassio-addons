@@ -142,9 +142,9 @@ async def _wyoming_read_event(reader: asyncio.StreamReader) -> tuple[str, dict, 
 
 
 class WyomingWakeWordDetector:
-    """Détection de wake word via Wyoming openWakeWord (core-openwakeword:10400)."""
+    """Détection de wake word via Wyoming OWW — une connexion par caméra."""
 
-    CHUNK_BYTES = int(RATE * WIDTH * CHANNELS * 100 / 1000)  # 100ms = 3200 bytes
+    CHUNK_BYTES = int(RATE * WIDTH * CHANNELS * 80 / 1000)  # 80ms = 2560 bytes (taille native OWW)
 
     def __init__(self, streams: dict[str, "CameraStream"], wyoming_uri: str, on_detect, debounce: float = PIPELINE_DEBOUNCE_S):
         self.streams = streams
@@ -157,112 +157,102 @@ class WyomingWakeWordDetector:
 
     async def _connect(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         reader, writer = await asyncio.open_connection(self.host, self.port)
-        # detect → audio-start (protocole minimal Wyoming wake word)
         writer.write(_wyoming_encode("detect", {}))
         writer.write(_wyoming_encode("audio-start", {
             "rate": RATE, "width": WIDTH, "channels": CHANNELS,
         }))
         await writer.drain()
-        log.info("Wyoming OWW: connecté à %s:%d", self.host, self.port)
         return reader, writer
 
-    async def _reader_task(self, reader: asyncio.StreamReader):
-        """Lit les events OWW en continu dans sa propre task."""
+    async def _camera_loop(self, cam_name: str, stream: "CameraStream"):
+        """Boucle dédiée à UNE caméra : audio continu → OWW → detection."""
+        queue = stream.subscribe()
+        buf = bytearray()
+        n = 0
+        try:
+            while True:
+                try:
+                    reader, writer = await self._connect()
+                    log.info("OWW [%s]: connecté", cam_name)
+                except Exception as e:
+                    log.error("OWW [%s]: connexion impossible: %s — retry 5s", cam_name, e)
+                    await asyncio.sleep(5)
+                    continue
+
+                reader_task = asyncio.create_task(
+                    self._reader_loop(cam_name, reader), name=f"oww-reader-{cam_name}"
+                )
+                try:
+                    while not reader_task.done():
+                        try:
+                            buf.extend(queue.get_nowait())
+                        except asyncio.QueueEmpty:
+                            await asyncio.sleep(0.005)
+                            continue
+
+                        while len(buf) >= self.CHUNK_BYTES:
+                            chunk = bytes(buf[:self.CHUNK_BYTES])
+                            del buf[:self.CHUNK_BYTES]
+                            writer.write(_wyoming_encode("audio-chunk", {
+                                "rate": RATE, "width": WIDTH, "channels": CHANNELS,
+                            }, chunk))
+                            n += 1
+                            if n % 125 == 0:  # ~10s
+                                log.info("OWW [%s]: rms=%.4f chunks=%d", cam_name, stream.rms, n)
+                        await writer.drain()
+                except Exception as e:
+                    log.warning("OWW [%s]: write error: %s", cam_name, e)
+
+                reader_task.cancel()
+                if not writer.is_closing():
+                    writer.close()
+                log.info("OWW [%s]: déconnecté, retry 3s", cam_name)
+                await asyncio.sleep(3)
+        finally:
+            stream.unsubscribe(queue)
+
+    async def _reader_loop(self, cam_name: str, reader: asyncio.StreamReader):
+        """Lit les events OWW pour une caméra."""
         while True:
             try:
                 evt_type, data, _ = await _wyoming_read_event(reader)
             except Exception as e:
-                log.warning("Wyoming OWW: reader error: %s", e)
-                return  # signal déconnexion
+                log.warning("OWW [%s]: reader error: %s", cam_name, e)
+                return
 
-            log.debug("OWW event reçu: type=%s data=%s", evt_type, data)
-            if evt_type != "detection":
-                continue
-
-            now = time.monotonic()
-            if now - self._last_detect < self.debounce:
-                continue
-            self._last_detect = now
-
-            best = max(self.streams, key=lambda n: self.streams[n].rms)
-            best_stream = self.streams[best]
-            log.info("Wake word! name=%s score=%.2f src=%s rms=%.3f",
-                     data.get("name"), data.get("score", 1.0), best, best_stream.rms)
-            event = WakeEvent(
-                camera=best_stream.camera,
-                ww_score=float(data.get("score", 1.0)),
-                rms=best_stream.rms,
-                timestamp=now,
-                all_scores={best: float(data.get("score", 1.0))},
-                all_rms={n: s.rms for n, s in self.streams.items()},
-            )
-            asyncio.ensure_future(self.on_detect(event))
+            if evt_type == "detection":
+                now = time.monotonic()
+                if now - self._last_detect < self.debounce:
+                    log.info("OWW [%s]: detection ignorée (debounce)", cam_name)
+                    continue
+                self._last_detect = now
+                score = float(data.get("score", 1.0))
+                log.info("Wake word! cam=%s name=%s score=%.2f rms=%.3f",
+                         cam_name, data.get("name"), score, self.streams[cam_name].rms)
+                event = WakeEvent(
+                    camera=self.streams[cam_name].camera,
+                    ww_score=score,
+                    rms=self.streams[cam_name].rms,
+                    timestamp=now,
+                    all_scores={cam_name: score},
+                    all_rms={n: s.rms for n, s in self.streams.items()},
+                )
+                asyncio.ensure_future(self.on_detect(event))
+            else:
+                log.info("OWW [%s]: event=%s data=%s", cam_name, evt_type, data)
 
     async def run(self):
-        queues = {name: stream.subscribe() for name, stream in self.streams.items()}
-        buffers: dict[str, bytearray] = {name: bytearray() for name in self.streams}
-        n_sent = 0
-        reader_task: asyncio.Task | None = None
-
+        tasks = [
+            asyncio.create_task(self._camera_loop(name, stream), name=f"oww-{name}")
+            for name, stream in self.streams.items()
+        ]
         try:
-            while True:
-                # (Re)connexion
-                try:
-                    reader, writer = await self._connect()
-                except Exception as e:
-                    log.error("Wyoming OWW: connexion impossible: %s — retry 5s", e)
-                    await asyncio.sleep(5)
-                    continue
-
-                if reader_task:
-                    reader_task.cancel()
-                reader_task = asyncio.create_task(self._reader_task(reader), name="oww-reader")
-
-                # Boucle d'envoi audio
-                try:
-                    while not reader_task.done():
-                        for name, q in queues.items():
-                            while True:
-                                try:
-                                    buffers[name].extend(q.get_nowait())
-                                except asyncio.QueueEmpty:
-                                    break
-
-                        ready = [n for n, b in buffers.items() if len(b) >= self.CHUNK_BYTES]
-                        if not ready:
-                            await asyncio.sleep(0.01)
-                            continue
-
-                        src = max(ready, key=lambda n: self.streams[n].rms)
-                        chunk = bytes(buffers[src][:self.CHUNK_BYTES])
-                        del buffers[src][:self.CHUNK_BYTES]
-
-                        writer.write(_wyoming_encode("audio-chunk", {
-                            "rate": RATE, "width": WIDTH, "channels": CHANNELS,
-                            "timestamp": int(time.monotonic() * 1000),
-                        }, chunk))
-                        await writer.drain()
-
-                        n_sent += 1
-                        if n_sent % 100 == 0:
-                            rms = {n: f"{s.rms:.4f}" for n, s in self.streams.items()}
-                            log.info("Wyoming OWW: src=%s rms=%s chunks=%d", src, rms, n_sent)
-
-                except Exception as e:
-                    log.warning("Wyoming OWW: write error: %s — reconnexion", e)
-
-                if not writer.is_closing():
-                    writer.close()
-                log.info("Wyoming OWW: déconnecté, retry 3s")
-                await asyncio.sleep(3)
-
+            await asyncio.gather(*tasks)
         except Exception as e:
             log.error("WyomingWakeWord error: %s", e, exc_info=True)
         finally:
-            for name, q in queues.items():
-                self.streams[name].unsubscribe(q)
-            if reader_task:
-                reader_task.cancel()
+            for t in tasks:
+                t.cancel()
 
 
 class MultiMicSatellite:
