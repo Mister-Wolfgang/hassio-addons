@@ -166,7 +166,7 @@ async def run_full_pipeline(wake_event, streams: dict, config: dict):
     # 3. Contexte Frigate + HA (en parallèle avec rien d'autre à faire ici)
     log.info("[Pipeline] Contexte Frigate + HA...")
     context = await build_context(
-        frigate_url=config["frigate_url"],
+        frigate_url=config.get("frigate_url", ""),
         all_cameras=config["cameras"],
         ww_scores=wake_event.all_scores,
         rms_values=wake_event.all_rms,
