@@ -82,7 +82,6 @@ async def handle(transcript: str, context: dict, **_) -> str:
             CLAUDE_BIN,
             "--system-prompt", SYSTEM_PROMPT,
             "--allowedTools", "bash",
-            "--permission-mode", "bypassPermissions",
             "-p", prompt,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
