@@ -98,10 +98,15 @@ class CameraStream:
                     stderr=asyncio.subprocess.PIPE,
                 )
                 asyncio.ensure_future(self._log_stderr(proc))
+                log.info("[%s] FFmpeg démarré (pid=%d)", self.camera.name, proc.pid)
+                first = True
                 while True:
                     data = await proc.stdout.read(CHUNK_BYTES)
                     if not data:
                         break
+                    if first:
+                        log.info("[%s] Premier chunk audio reçu ✓", self.camera.name)
+                        first = False
                     self._rms_buf.push(data)
                     for q in list(self._subscribers):
                         try:
@@ -183,6 +188,7 @@ class WakeWordWatcher:
             audio_q = None
             try:
                 async with WyomingClient(self.wake_uri) as client:
+                    log.info("[%s] Connecté à openWakeWord ✓", self.stream.camera.name)
                     audio_q = self.stream.subscribe()
                     await asyncio.gather(
                         self._send_audio(client, audio_q),
