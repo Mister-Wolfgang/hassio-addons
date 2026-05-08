@@ -80,8 +80,8 @@ async def _tts(text: str, tts_uri: str, voice: str = "", language: str = "fr") -
 
 # ─── Capture audio commande avec VAD simple ───────────────────────────────────
 
-async def _capture_command(audio_q: asyncio.Queue) -> bytes:
-    buf = bytearray()
+async def _capture_command(audio_q: asyncio.Queue, prepend: bytes = b"") -> bytes:
+    buf = bytearray(prepend)
     silence_start: float | None = None
     loop = asyncio.get_event_loop()
     start_time = loop.time()
@@ -139,10 +139,11 @@ async def run_full_pipeline(wake_event, streams: dict, config: dict):
     cam = wake_event.camera
     log.info("[Pipeline] Déclenchement: %s (pièce: %s)", cam.name, cam.room)
 
-    # 1. Capture audio commande
+    # 1. Capture audio commande (+ audio récent pour attraper la commande dite juste après le wake word)
+    pre_audio = streams[cam.name].recent_audio()
     audio_q = streams[cam.name].subscribe()
     try:
-        audio_data = await _capture_command(audio_q)
+        audio_data = await _capture_command(audio_q, prepend=pre_audio)
     finally:
         streams[cam.name].unsubscribe(audio_q)
 

@@ -56,6 +56,9 @@ class RMSBuffer:
         arr = np.frombuffer(b"".join(self._chunks), dtype=np.int16).astype(np.float32)
         return float(np.sqrt(np.mean(arr ** 2))) / 32768.0
 
+    def snapshot(self) -> bytes:
+        return b"".join(self._chunks)
+
 
 class CameraStream:
     """Lit le flux RTSP d'une caméra et distribue les chunks PCM aux abonnés."""
@@ -77,6 +80,10 @@ class CameraStream:
     @property
     def rms(self) -> float:
         return self._rms_buf.rms()
+
+    def recent_audio(self) -> bytes:
+        """Dernières ~2s d'audio (pour pré-remplir le buffer pipeline)."""
+        return self._rms_buf.snapshot()
 
     async def _log_stderr(self, proc):
         async for line in proc.stderr:
