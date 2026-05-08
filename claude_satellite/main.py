@@ -295,7 +295,7 @@ async def login_stream():
                 clean = re.sub(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])", "", chunk)
                 clean = clean.replace("\r", "")
                 buf += clean
-                log.info("claude pty: %s", repr(clean.strip()[:120]))
+                log.info("claude pty: %s", repr(clean.strip()[:300]))
 
                 if not url_sent:
                     # Supprimer les caractères de contrôle restants avant de chercher l'URL
@@ -307,8 +307,13 @@ async def login_stream():
 
                 # Détecte le succès du login dans le texte
                 if url_sent and not login_ok:
-                    low = buf.lower()
-                    if any(p in low for p in ("logged in", "authenticated", "welcome back", "connecté", "succès")):
+                    low = re.sub(r"[\x00-\x1f\x7f]", "", buf).lower()
+                    success_patterns = ("logged in", "authenticated", "welcome back",
+                                        "connecté", "succès", "signed in", "login successful",
+                                        "you are now", "session started", "✓", "✔",
+                                        "claude >", "claude>")
+                    if any(p in low for p in success_patterns):
+                        log.info("login: succès détecté")
                         login_ok = True
                         key_task.cancel()
                         proc.terminate()
