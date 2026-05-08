@@ -159,7 +159,11 @@ class WakeWordWatcher:
 
     async def _recv_detections(self, client: WyomingClient):
         while True:
-            evt = await client.recv()
+            try:
+                evt = await asyncio.wait_for(client.recv(), timeout=15.0)
+            except asyncio.TimeoutError:
+                log.warning("[%s] OWW silencieux depuis 15s — aucun event reçu", self.stream.camera.name)
+                continue
             evt_type = evt.get("type")
             # Log ALL events from OWW for diagnosis
             log.info("[%s] OWW← %s | %s", self.stream.camera.name, evt_type, evt.get("data"))
