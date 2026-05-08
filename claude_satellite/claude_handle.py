@@ -80,6 +80,7 @@ async def handle(transcript: str, context: dict, **_) -> str:
     try:
         proc = await asyncio.create_subprocess_exec(
             CLAUDE_BIN,
+            "--output-format", "text",
             "--system-prompt", SYSTEM_PROMPT,
             "--allowedTools", "bash",
             "-p", prompt,
@@ -97,7 +98,8 @@ async def handle(transcript: str, context: dict, **_) -> str:
         return ""
 
     if proc.returncode != 0:
-        log.error("claude exit %d: %s", proc.returncode, stderr.decode()[:300])
+        log.error("claude exit %d\nSTDERR: %s\nSTDOUT: %s",
+                  proc.returncode, stderr.decode()[:500], stdout.decode()[:500])
         return ""
 
     output = stdout.decode()
