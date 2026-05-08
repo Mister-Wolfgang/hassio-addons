@@ -72,19 +72,23 @@ async def handle(transcript: str, context: dict, **_) -> str:
     """Appelle claude CLI dans le container, retourne le texte TTS."""
     prompt = _build_prompt(transcript, context)
 
-    # Debug: vérifier où sont les credentials
-    import pathlib, json as _json
-    for p in ("/data/.claude.json", "/root/.claude.json"):
-        pp = pathlib.Path(p)
-        if pp.exists():
-            try:
-                content = _json.loads(pp.read_text())
-                log.info("%s keys: %s", p, list(content.keys()))
-            except Exception:
-                log.info("%s raw: %s", p, pp.read_text()[:300])
-    sessions_dir = pathlib.Path("/data/.claude/sessions")
-    if sessions_dir.exists():
-        log.info("sessions/: %s", [f.name for f in sessions_dir.iterdir()])
+    # Debug: inspecter l'environnement et les fichiers credentials
+    import pathlib, json as _json, subprocess as _sp
+    log.info("NODE_OPTIONS=%r  HOME=%r", os.environ.get("NODE_OPTIONS"), os.environ.get("HOME"))
+    log.info(".claude-keytar.json exists: %s", pathlib.Path("/data/.claude-keytar.json").exists())
+    # Inspecter le binaire claude (shell script vs compiled)
+    try:
+        head = open(CLAUDE_BIN, "rb").read(256)
+        log.info("claude binary head: %s", repr(head[:80]))
+    except Exception as e:
+        log.info("claude binary read error: %s", e)
+    # Scanner tous les fichiers modifiés dans /data depuis 30min
+    try:
+        out = _sp.check_output(["find", "/data", "-newer", "/tmp", "-type", "f"],
+                                stderr=_sp.DEVNULL, timeout=3).decode()
+        log.info("recent /data files: %s", out.strip()[:400])
+    except Exception:
+        pass
 
     env = {
         **os.environ,
