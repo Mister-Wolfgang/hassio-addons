@@ -1,1 +1,2 @@
-claude_satellite/claude_handle.py
+claude_satellite/Dockerfile
+claude_satellite/run.sh
