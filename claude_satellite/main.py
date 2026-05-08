@@ -313,7 +313,8 @@ async def login_stream():
                     success_patterns = ("logged in", "authenticated", "welcome back",
                                         "signed in", "login successful",
                                         "you are now", "session started",
-                                        "claude >", "claude>")
+                                        "claude >", "claude>",
+                                        "*" * 20)  # animation de validation OAuth
                     if any(p in low for p in success_patterns):
                         log.info("login: succès détecté — attente écriture credentials")
                         login_ok = True
