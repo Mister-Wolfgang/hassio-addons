@@ -303,14 +303,16 @@ async def login_stream():
                     m = re.search(r"https://\S{20,}", searchable)
                     if m:
                         url_sent = True
+                        buf = ""  # reset: ne chercher le succès que dans le texte POST-URL
                         yield f"data: {json.dumps({'url': m.group(0).rstrip('.')})}\n\n"
+                        continue  # pas de check succès dans ce même chunk
 
-                # Détecte le succès du login dans le texte
+                # Détecte le succès du login dans le texte (uniquement sur output post-URL)
                 if url_sent and not login_ok:
                     low = re.sub(r"[\x00-\x1f\x7f]", "", buf).lower()
                     success_patterns = ("logged in", "authenticated", "welcome back",
-                                        "connecté", "succès", "signed in", "login successful",
-                                        "you are now", "session started", "✓", "✔",
+                                        "signed in", "login successful",
+                                        "you are now", "session started",
                                         "claude >", "claude>")
                     if any(p in low for p in success_patterns):
                         log.info("login: succès détecté — attente écriture credentials")
