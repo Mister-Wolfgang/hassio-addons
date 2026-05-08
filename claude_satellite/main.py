@@ -86,6 +86,89 @@ class ClaudeSession:
 
 
 _claude_session: ClaudeSession | None = None
+_auto_start_task: asyncio.Task | None = None
+
+
+async def _auto_start_claude():
+    """Démarre automatiquement la session Claude au startup (keyring requis)."""
+    global _claude_session
+    import pty
+    import subprocess
+    import select as _sel
+
+    await asyncio.sleep(5)  # laisser le container se stabiliser
+    if _claude_session and _claude_session.is_alive():
+        return  # déjà connecté (login manuel anticipé)
+
+    log.info("Auto-démarrage session Claude...")
+    env = {**os.environ, "HOME": "/data"}
+    master_fd, slave_fd = pty.openpty()
+    proc = None
+    login_ok = False
+    try:
+        proc = subprocess.Popen(
+            ["/usr/local/bin/claude"],
+            stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
+            env=env, close_fds=True,
+        )
+        os.close(slave_fd)
+
+        # Passer les écrans de setup
+        await asyncio.sleep(1.5)
+        for _ in range(3):
+            os.write(master_fd, b"\r")
+            await asyncio.sleep(0.8)
+        os.write(master_fd, b"/login\r")
+
+        buf = ""
+        deadline = asyncio.get_event_loop().time() + 45
+        while asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.05)
+            r, _, _ = _sel.select([master_fd], [], [], 0)
+            if not r:
+                continue
+            try:
+                chunk = os.read(master_fd, 4096).decode("utf-8", errors="replace")
+            except OSError:
+                break
+            clean = re.sub(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])", "", chunk)
+            clean = re.sub(r"[\x00-\x1f\x7f]", "", clean)
+            buf += clean
+
+            if re.search(r"https://claude\.com\S{10,}", buf):
+                log.info("Auto-démarrage: keyring vide → visiter /login pour l'OAuth")
+                return
+
+            if "*" * 20 in buf or any(p in buf.lower() for p in
+                                       ("login successful", "logged in", "claude >", "claude>")):
+                login_ok = True
+                os.write(master_fd, b"\r")  # "Press Enter to continue"
+                await asyncio.sleep(2)
+                drained = 0
+                while True:
+                    r2, _, _ = _sel.select([master_fd], [], [], 0.1)
+                    if not r2:
+                        break
+                    try:
+                        chunk2 = os.read(master_fd, 8192)
+                        drained += len(chunk2)
+                    except OSError:
+                        break
+                _claude_session = ClaudeSession(master_fd, proc)
+                log.info("Auto-démarrage réussi — session Claude active (%d octets drainés)", drained)
+                return
+
+        log.warning("Auto-démarrage: timeout — visiter /login pour s'authentifier")
+    except Exception as e:
+        log.error("Auto-démarrage erreur: %s", e)
+    finally:
+        if not login_ok:
+            try:
+                os.close(master_fd)
+            except OSError:
+                pass
+            if proc and proc.poll() is None:
+                proc.terminate()
 
 
 def _load_config() -> dict:
@@ -206,10 +289,12 @@ async def lifespan(app: FastAPI):
 
     _satellite = MultiMicSatellite(cameras=cameras, config=config)
     task = asyncio.create_task(_satellite.start())
+    auto_task = asyncio.create_task(_auto_start_claude())
 
     log.info("Claude Satellite démarré — %d caméra(s)", len(cameras))
     yield
 
+    auto_task.cancel()
     task.cancel()
     try:
         await task
