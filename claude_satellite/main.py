@@ -390,7 +390,23 @@ async def login_stream():
                                  "existant" if not url_sent else "nouveau")
                         login_ok = True
                         key_task.cancel()
-                        await asyncio.sleep(2)
+                        await asyncio.sleep(1)
+                        # Valider l'écran "Login successful. Press Enter to continue…"
+                        os.write(master_fd, b"\r")
+                        await asyncio.sleep(2)  # laisser claude charger le prompt interactif
+                        # Vider le buffer PTY (écrans d'onboarding résiduels)
+                        import select as _sel2
+                        drained = 0
+                        while True:
+                            r2, _, _ = _sel2.select([master_fd], [], [], 0.1)
+                            if not r2:
+                                break
+                            try:
+                                chunk2 = os.read(master_fd, 8192)
+                                drained += len(chunk2)
+                            except OSError:
+                                break
+                        log.info("login: PTY drainé (%d octets résiduels)", drained)
                         _claude_session = ClaudeSession(master_fd, proc)
                         yield f"data: {json.dumps({'status': 'ok'})}\n\n"
                         return
