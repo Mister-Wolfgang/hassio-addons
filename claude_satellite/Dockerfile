@@ -16,17 +16,26 @@ RUN npm install -g @anthropic-ai/claude-code
 
 WORKDIR /app
 
-# onnxruntime n'a pas de wheel musllinux — on télécharge le wheel manylinux
-# et on l'installe manuellement (fonctionne grâce à gcompat sur Alpine)
+# onnxruntime n'a pas de wheel musllinux — téléchargement du wheel manylinux
+# + extraction directe dans site-packages (bypass vérif plateforme, gcompat requis)
 RUN pip download onnxruntime \
         --platform manylinux_2_27_x86_64 \
         --python-version 312 \
         --implementation cp \
         --abi cp312 \
         --only-binary :all: \
+        --no-deps \
         --index-url https://pypi.org/simple \
         -d /tmp/oww_wheels \
-    && pip install --no-deps /tmp/oww_wheels/onnxruntime-*.whl \
+    && python -c "
+import zipfile, site, glob
+sp = site.getsitepackages()[0]
+for whl in glob.glob('/tmp/oww_wheels/onnxruntime-*.whl'):
+    print('Extracting', whl, '->', sp)
+    with zipfile.ZipFile(whl) as z:
+        z.extractall(sp)
+print('onnxruntime installed')
+" \
     && rm -rf /tmp/oww_wheels
 
 COPY requirements.txt .
