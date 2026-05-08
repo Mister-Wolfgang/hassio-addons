@@ -9,7 +9,8 @@ RUN apk add --no-cache \
     npm \
     gcompat \
     libstdc++ \
-    libgcc
+    libgcc \
+    libgomp
 
 RUN npm install -g @anthropic-ai/claude-code
 
@@ -18,7 +19,7 @@ WORKDIR /app
 # onnxruntime n'a pas de wheel musllinux — on télécharge le wheel manylinux
 # et on l'installe manuellement (fonctionne grâce à gcompat sur Alpine)
 RUN pip download onnxruntime \
-        --platform manylinux_2_17_x86_64 \
+        --platform manylinux_2_27_x86_64 \
         --python-version 312 \
         --implementation cp \
         --abi cp312 \
