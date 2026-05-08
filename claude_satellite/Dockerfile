@@ -27,15 +27,7 @@ RUN pip download onnxruntime \
         --no-deps \
         --index-url https://pypi.org/simple \
         -d /tmp/oww_wheels \
-    && python -c "
-import zipfile, site, glob
-sp = site.getsitepackages()[0]
-for whl in glob.glob('/tmp/oww_wheels/onnxruntime-*.whl'):
-    print('Extracting', whl, '->', sp)
-    with zipfile.ZipFile(whl) as z:
-        z.extractall(sp)
-print('onnxruntime installed')
-" \
+    && python -c "import zipfile,site,glob; sp=site.getsitepackages()[0]; [zipfile.ZipFile(w).extractall(sp) or print('Extracted',w) for w in glob.glob('/tmp/oww_wheels/onnxruntime-*.whl')]" \
     && rm -rf /tmp/oww_wheels
 
 COPY requirements.txt .
