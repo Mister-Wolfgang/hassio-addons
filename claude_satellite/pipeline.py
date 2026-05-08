@@ -56,7 +56,45 @@ async def _stt(audio_data: bytes, stt_uri: str, language: str = "fr") -> str:
 
 # ─── TTS via Piper Wyoming ───────────────────────────────────────────────────
 
+_piper_voice_cache: str = ""
+
+
+async def _discover_piper_voice(tts_uri: str, language: str = "fr") -> str:
+    """Envoie 'describe' à Piper et retourne le nom de la première voix correspondant à la langue."""
+    try:
+        async with WyomingClient(tts_uri) as c:
+            await c.send("describe", {})
+            for _ in range(5):
+                evt = await asyncio.wait_for(c.recv(), timeout=5)
+                if evt.get("type") != "info":
+                    continue
+                voices = (evt.get("data") or {}).get("tts", [])
+                for engine in voices:
+                    for v in engine.get("voices", []):
+                        langs = v.get("languages") or []
+                        name = v.get("name", "")
+                        if any(lg.startswith(language) for lg in langs):
+                            log.info("Voix Piper auto-découverte: %s (langues: %s)", name, langs)
+                            return name
+                # fallback: première voix disponible
+                for engine in voices:
+                    for v in engine.get("voices", []):
+                        name = v.get("name", "")
+                        if name:
+                            log.warning("Pas de voix '%s', fallback: %s", language, name)
+                            return name
+    except Exception as e:
+        log.warning("Piper voice discovery: %s", e)
+    return ""
+
+
 async def _tts(text: str, tts_uri: str, voice: str = "", language: str = "fr") -> bytes:
+    global _piper_voice_cache
+    if not voice:
+        if not _piper_voice_cache:
+            _piper_voice_cache = await _discover_piper_voice(tts_uri, language)
+        voice = _piper_voice_cache
+
     voice_data: dict = {"language": language}
     if voice:
         voice_data["name"] = voice
