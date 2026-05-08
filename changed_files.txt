@@ -1,3 +1,1 @@
 claude_satellite/Dockerfile
-claude_satellite/build.yaml
-claude_satellite/requirements.txt
