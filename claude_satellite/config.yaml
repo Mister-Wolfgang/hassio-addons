@@ -11,7 +11,6 @@ arch:
 startup: application
 boot: auto
 init: false
-host_network: true
 
 homeassistant_api: true
 hassio_api: true
@@ -29,9 +28,9 @@ panel_icon: mdi:microphone-ai
 panel_title: "Claude Satellite"
 
 options:
-  wyoming_wake_uri: "tcp://localhost:10400"
-  wyoming_stt_uri: "tcp://localhost:10300"
-  wyoming_tts_uri: "tcp://localhost:10200"
+  wyoming_wake_uri: "tcp://core-openwakeword:10400"
+  wyoming_stt_uri: "tcp://core-whisper:10300"
+  wyoming_tts_uri: "tcp://core-piper:10200"
   wake_word: "hey_jarvis"
   frigate_url: "http://homeassistant:5000"
   go2rtc_url: "http://homeassistant:1984"
