@@ -245,15 +245,20 @@ async def login_stream():
             os.close(slave_fd)
 
             # Navigue automatiquement à travers l'onboarding puis déclenche /login
+            # Les TUI attendent \r (CR) pour valider, pas \n
             async def send_keys():
                 await asyncio.sleep(1.5)
-                os.write(master_fd, b"\n")      # Accepte le thème par défaut
+                log.info("login: sending Enter (theme)")
+                os.write(master_fd, b"\r")       # Accepte le thème par défaut
+                await asyncio.sleep(1.0)
+                log.info("login: sending Enter (setup 2)")
+                os.write(master_fd, b"\r")       # Éventuel autre écran setup
+                await asyncio.sleep(1.0)
+                log.info("login: sending Enter (setup 3)")
+                os.write(master_fd, b"\r")       # Idem
                 await asyncio.sleep(0.8)
-                os.write(master_fd, b"\n")      # Éventuel autre écran setup
-                await asyncio.sleep(0.8)
-                os.write(master_fd, b"\n")      # Idem
-                await asyncio.sleep(0.6)
-                os.write(master_fd, b"/login\n") # Déclenche l'OAuth
+                log.info("login: sending /login")
+                os.write(master_fd, b"/login\r") # Déclenche l'OAuth
 
             key_task = asyncio.create_task(send_keys())
 
