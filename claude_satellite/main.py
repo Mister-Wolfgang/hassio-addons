@@ -26,24 +26,48 @@ def _load_config() -> dict:
         return json.load(f)
 
 
-async def _resolve_rtsp(camera: dict, go2rtc_url: str, go2rtc_rtsp: str) -> str:
-    """Retourne l'URL RTSP — depuis la config si présente, sinon depuis go2rtc."""
-    if camera.get("rtsp_url"):
-        return camera["rtsp_url"]
+async def _discover_cameras(go2rtc_rtsp: str) -> list[CameraConfig]:
+    """Découvre automatiquement les caméras Frigate depuis les states HA."""
+    ha_token = os.environ.get("SUPERVISOR_TOKEN", "")
+    headers = {"Authorization": f"Bearer {ha_token}"}
 
-    stream_name = camera["frigate_camera"]
     try:
         async with httpx.AsyncClient() as c:
-            r = await c.get(f"{go2rtc_url}/api/streams", timeout=5)
-            streams = r.json()
-            if stream_name in streams:
-                url = f"{go2rtc_rtsp}/{stream_name}"
-                log.info("[%s] RTSP auto-découvert : %s", camera["name"], url)
-                return url
+            r = await c.get(
+                "http://supervisor/core/api/states",
+                headers=headers,
+                timeout=10,
+            )
+            r.raise_for_status()
+            states = r.json()
     except Exception as e:
-        log.warning("[%s] go2rtc unavailable: %s", camera["name"], e)
+        log.error("Impossible de contacter l'API HA pour la découverte: %s", e)
+        return []
 
-    raise RuntimeError(f"Impossible de trouver l'URL RTSP pour '{stream_name}'. Configurez rtsp_url manuellement.")
+    cameras = []
+    for state in states:
+        entity_id = state.get("entity_id", "")
+        if not entity_id.startswith("camera."):
+            continue
+        attrs = state.get("attributes", {})
+        # Uniquement les caméras Frigate
+        if attrs.get("client_id") != "frigate":
+            continue
+
+        camera_name = attrs.get("camera_name") or entity_id.removeprefix("camera.")
+        friendly_name = attrs.get("friendly_name", camera_name)
+        rtsp_url = f"{go2rtc_rtsp}/{camera_name}"
+
+        cameras.append(CameraConfig(
+            name=camera_name,
+            room=friendly_name,
+            rtsp_url=rtsp_url,
+            frigate_camera=camera_name,
+            talkback_camera=camera_name,
+        ))
+        log.info("Caméra découverte: %s (%s) -> %s", camera_name, friendly_name, rtsp_url)
+
+    return cameras
 
 
 @asynccontextmanager
@@ -51,22 +75,29 @@ async def lifespan(app: FastAPI):
     global _satellite
 
     config = _load_config()
-    go2rtc_url = config.get("go2rtc_url", "http://homeassistant:1984")
     go2rtc_rtsp = config.get("go2rtc_rtsp", "rtsp://homeassistant:8554")
 
-    cameras = []
-    for c in config.get("cameras", []):
-        rtsp_url = await _resolve_rtsp(c, go2rtc_url, go2rtc_rtsp)
-        cameras.append(CameraConfig(
-            name=c["name"],
-            room=c["room"],
-            rtsp_url=rtsp_url,
-            frigate_camera=c["frigate_camera"],
-            talkback_camera=c.get("talkback_camera", ""),
-        ))
-
-    if not cameras:
-        log.warning("Aucune caméra configurée — satellite inactif")
+    manual_cameras = config.get("cameras", [])
+    if manual_cameras:
+        # Caméras déclarées manuellement — on les utilise telles quelles
+        cameras = []
+        go2rtc_url = config.get("go2rtc_url", "http://homeassistant:1984")
+        for c in manual_cameras:
+            rtsp_url = c.get("rtsp_url") or f"{go2rtc_rtsp}/{c['frigate_camera']}"
+            cameras.append(CameraConfig(
+                name=c["name"],
+                room=c.get("room", c["name"]),
+                rtsp_url=rtsp_url,
+                frigate_camera=c["frigate_camera"],
+                talkback_camera=c.get("talkback_camera", c["frigate_camera"]),
+            ))
+        log.info("%d caméra(s) chargée(s) depuis la config", len(cameras))
+    else:
+        # Auto-découverte via l'API HA
+        log.info("Aucune caméra configurée — découverte automatique via HA...")
+        cameras = await _discover_cameras(go2rtc_rtsp)
+        if not cameras:
+            log.warning("Aucune caméra Frigate trouvée — satellite inactif")
 
     _satellite = MultiMicSatellite(cameras=cameras, config=config)
     task = asyncio.create_task(_satellite.start())

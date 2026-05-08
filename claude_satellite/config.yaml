@@ -1,6 +1,6 @@
 name: "Claude Satellite"
 
-version: "1.0.14"
+version: "1.0.15"
 
 slug: claude_satellite
 description: "Satellite vocal multi-caméras avec Claude AI — 1 pipeline, toutes les pièces"
@@ -32,8 +32,6 @@ options:
   wyoming_tts_uri: "tcp://core-piper:10200"
   wyoming_wake_uri: "tcp://core-openwakeword:10400"
   wake_word: "hey_jarvis"
-  frigate_url: "http://homeassistant:5000"
-  go2rtc_url: "http://homeassistant:1984"
   go2rtc_rtsp: "rtsp://homeassistant:8554"
   tts_voice: ""
   tts_language: "fr"
@@ -45,8 +43,6 @@ schema:
   wyoming_tts_uri: str
   wyoming_wake_uri: str
   wake_word: str
-  frigate_url: str
-  go2rtc_url: str
   go2rtc_rtsp: str
   tts_voice: "str?"
   tts_language: "str?"
