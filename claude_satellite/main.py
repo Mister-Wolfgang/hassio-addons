@@ -26,10 +26,46 @@ def _load_config() -> dict:
         return json.load(f)
 
 
+async def _get_frigate_rtsp_base(ha_headers: dict) -> str | None:
+    """Trouve l'URL RTSP go2rtc depuis la config de l'intégration Frigate dans HA."""
+    try:
+        async with httpx.AsyncClient() as c:
+            r = await c.get(
+                "http://supervisor/core/api/config/config_entries/entry",
+                headers=ha_headers,
+                timeout=10,
+            )
+            r.raise_for_status()
+            entries = r.json()
+    except Exception as e:
+        log.warning("Impossible de lire les config_entries HA: %s", e)
+        return None
+
+    for entry in entries:
+        if entry.get("domain") != "frigate":
+            continue
+        title = entry.get("title", "")
+        # title = "192.168.1.131:5000" → on extrait l'hôte
+        host = title.split(":")[0]
+        if host:
+            rtsp_base = f"rtsp://{host}:8554"
+            log.info("Frigate détecté via config_entry: %s → RTSP base: %s", title, rtsp_base)
+            return rtsp_base
+
+    return None
+
+
 async def _discover_cameras(go2rtc_rtsp: str) -> list[CameraConfig]:
     """Découvre automatiquement les caméras Frigate depuis les states HA."""
     ha_token = os.environ.get("SUPERVISOR_TOKEN", "")
     headers = {"Authorization": f"Bearer {ha_token}"}
+
+    # Auto-découverte de l'URL RTSP si non configurée explicitement
+    rtsp_base = go2rtc_rtsp
+    if not go2rtc_rtsp or go2rtc_rtsp == "rtsp://homeassistant:8554":
+        discovered = await _get_frigate_rtsp_base(headers)
+        if discovered:
+            rtsp_base = discovered
 
     try:
         async with httpx.AsyncClient() as c:
@@ -50,13 +86,12 @@ async def _discover_cameras(go2rtc_rtsp: str) -> list[CameraConfig]:
         if not entity_id.startswith("camera."):
             continue
         attrs = state.get("attributes", {})
-        # Uniquement les caméras Frigate
         if attrs.get("client_id") != "frigate":
             continue
 
         camera_name = attrs.get("camera_name") or entity_id.removeprefix("camera.")
         friendly_name = attrs.get("friendly_name", camera_name)
-        rtsp_url = f"{go2rtc_rtsp}/{camera_name}"
+        rtsp_url = f"{rtsp_base}/{camera_name}"
 
         cameras.append(CameraConfig(
             name=camera_name,
@@ -79,9 +114,7 @@ async def lifespan(app: FastAPI):
 
     manual_cameras = config.get("cameras", [])
     if manual_cameras:
-        # Caméras déclarées manuellement — on les utilise telles quelles
         cameras = []
-        go2rtc_url = config.get("go2rtc_url", "http://homeassistant:1984")
         for c in manual_cameras:
             rtsp_url = c.get("rtsp_url") or f"{go2rtc_rtsp}/{c['frigate_camera']}"
             cameras.append(CameraConfig(
@@ -93,8 +126,7 @@ async def lifespan(app: FastAPI):
             ))
         log.info("%d caméra(s) chargée(s) depuis la config", len(cameras))
     else:
-        # Auto-découverte via l'API HA
-        log.info("Aucune caméra configurée — découverte automatique via HA...")
+        log.info("Auto-découverte des caméras Frigate via l'API HA...")
         cameras = await _discover_cameras(go2rtc_rtsp)
         if not cameras:
             log.warning("Aucune caméra Frigate trouvée — satellite inactif")
