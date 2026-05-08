@@ -18,9 +18,10 @@ CHANNELS = 1
 CHUNK_MS = 100
 CHUNK_BYTES = int(RATE * WIDTH * CHANNELS * CHUNK_MS / 1000)
 
-COMMAND_TIMEOUT_S = 7.0
+COMMAND_TIMEOUT_S = 10.0
 SILENCE_THRESHOLD = 0.015
-SILENCE_DURATION_S = 0.8
+SILENCE_DURATION_S = 1.2   # durée de silence pour couper
+INITIAL_WAIT_S = 0.8       # attente min avant d'autoriser la coupure
 
 
 # ─── STT via Whisper Wyoming ──────────────────────────────────────────────────
@@ -76,8 +77,9 @@ async def _tts(text: str, tts_uri: str, voice: str = "", language: str = "fr") -
 
 async def _capture_command(audio_q: asyncio.Queue) -> bytes:
     buf = bytearray()
-    silent_chunks = 0
-    silent_needed = int(SILENCE_DURATION_S * 1000 / CHUNK_MS)
+    silence_start: float | None = None
+    loop = asyncio.get_event_loop()
+    start_time = loop.time()
 
     try:
         async with asyncio.timeout(COMMAND_TIMEOUT_S):
@@ -88,13 +90,18 @@ async def _capture_command(audio_q: asyncio.Queue) -> bytes:
                 buf.extend(chunk)
                 arr = np.frombuffer(chunk, dtype=np.int16).astype(np.float32)
                 rms = float(np.sqrt(np.mean(arr ** 2))) / 32768.0
+                now = loop.time()
+                elapsed = now - start_time
                 if rms < SILENCE_THRESHOLD:
-                    silent_chunks += 1
-                    if silent_chunks >= silent_needed and len(buf) > RATE * WIDTH * 0.3:
-                        log.debug("VAD: silence détectée, fin de commande")
-                        break
+                    if elapsed >= INITIAL_WAIT_S:
+                        if silence_start is None:
+                            silence_start = now
+                        elif now - silence_start >= SILENCE_DURATION_S:
+                            if len(buf) >= RATE * WIDTH * 0.3:
+                                log.debug("VAD: silence %.1fs, fin de commande (elapsed=%.2fs)", SILENCE_DURATION_S, elapsed)
+                                break
                 else:
-                    silent_chunks = 0
+                    silence_start = None
     except asyncio.TimeoutError:
         log.debug("VAD: timeout %.1fs", COMMAND_TIMEOUT_S)
 
