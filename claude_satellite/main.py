@@ -437,3 +437,25 @@ async def index():
             for s in _satellite.streams.values()
         ],
     })
+
+
+@app.post("/trigger/{camera_name}")
+async def trigger_wake(camera_name: str):
+    """Déclenche manuellement le pipeline pour une caméra (debug)."""
+    if not _satellite:
+        return JSONResponse({"ok": False, "error": "satellite not running"})
+    stream = _satellite.streams.get(camera_name)
+    if not stream:
+        available = list(_satellite.streams.keys())
+        return JSONResponse({"ok": False, "error": f"camera '{camera_name}' inconnue", "available": available})
+    from satellite import WakeEvent
+    event = WakeEvent(
+        camera=stream.camera,
+        ww_score=1.0,
+        rms=stream.rms,
+        timestamp=__import__("time").monotonic(),
+        all_scores={camera_name: 1.0},
+        all_rms={n: s.rms for n, s in _satellite.streams.items()},
+    )
+    asyncio.ensure_future(_satellite._on_wake(event))
+    return JSONResponse({"ok": True, "camera": camera_name, "rms": round(stream.rms, 4)})

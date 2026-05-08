@@ -139,14 +139,20 @@ def _wyoming_encode(event_type: str, data: dict, payload: bytes = b"") -> bytes:
 
 
 async def _wyoming_read_event(reader: asyncio.StreamReader) -> tuple[str, dict, bytes]:
-    """Lit un event Wyoming depuis un StreamReader."""
+    """Lit un event Wyoming depuis un StreamReader (protocole ≥1.8 compatible)."""
     line = await reader.readline()
+    if not line:
+        raise EOFError("OWW connection closed")
     line_str = line.decode().strip()
     try:
         header = json.loads(line_str)
     except json.JSONDecodeError:
-        # OWW concatène parfois deux JSON sur une ligne — parser seulement le premier
         header, _ = json.JSONDecoder().raw_decode(line_str)
+    # Wyoming ≥1.8 : data envoyé comme blob JSON séparé
+    data_len = header.get("data_length", 0)
+    if data_len:
+        data_blob = await reader.readexactly(data_len)
+        header["data"] = json.loads(data_blob.decode())
     payload = b""
     if header.get("payload_length", 0) > 0:
         payload = await reader.readexactly(header["payload_length"])
@@ -179,7 +185,6 @@ class WyomingWakeWordDetector:
     async def _camera_loop(self, cam_name: str, stream: "CameraStream"):
         """Boucle dédiée à UNE caméra : audio continu → OWW → detection."""
         queue = stream.subscribe()
-        buf = bytearray()
         n = 0
         try:
             while True:
@@ -191,6 +196,18 @@ class WyomingWakeWordDetector:
                     await asyncio.sleep(5)
                     continue
 
+                # Vider la queue des vieux chunks avant de commencer
+                drained = 0
+                while True:
+                    try:
+                        queue.get_nowait()
+                        drained += 1
+                    except asyncio.QueueEmpty:
+                        break
+                if drained:
+                    log.debug("OWW [%s]: %d vieux chunks vidés", cam_name, drained)
+
+                buf = bytearray()
                 reader_task = asyncio.create_task(
                     self._reader_loop(cam_name, reader), name=f"oww-reader-{cam_name}"
                 )
@@ -216,8 +233,13 @@ class WyomingWakeWordDetector:
                     log.warning("OWW [%s]: write error: %s", cam_name, e)
 
                 reader_task.cancel()
-                if not writer.is_closing():
-                    writer.close()
+                try:
+                    if not writer.is_closing():
+                        writer.write(_wyoming_encode("audio-stop", {}))
+                        await writer.drain()
+                        writer.close()
+                except Exception:
+                    pass
                 log.info("OWW [%s]: déconnecté, retry 3s", cam_name)
                 await asyncio.sleep(3)
         finally:
