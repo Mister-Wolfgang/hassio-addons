@@ -41,8 +41,13 @@ async def _stt(audio_data: bytes, stt_uri: str, language: str = "fr") -> str:
 
         for _ in range(120):
             evt = await asyncio.wait_for(c.recv(), timeout=10)
-            if evt.get("type") == "transcript":
+            t = evt.get("type")
+            log.debug("STT event: %s %s", t, evt.get("data"))
+            if t == "transcript":
                 return (evt.get("data") or {}).get("text", "").strip()
+            if t == "error":
+                log.error("STT error: %s", evt.get("data"))
+                return ""
 
     return ""
 
@@ -146,10 +151,12 @@ async def run_full_pipeline(wake_event, streams: dict, config: dict):
         return
 
     # 2. STT
-    log.info("[Pipeline] STT...")
-    transcript = await _stt(audio_data, config["wyoming_stt_uri"], config.get("tts_language", "fr"))
+    duration_s = len(audio_data) / (RATE * WIDTH * CHANNELS)
+    rms_audio = float(np.sqrt(np.mean(np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) ** 2))) / 32768.0
+    log.info("[Pipeline] STT... audio=%.2fs rms=%.4f", duration_s, rms_audio)
+    transcript = await _stt(audio_data, config["wyoming_stt_uri"], config.get("stt_language", config.get("tts_language", "fr")))
     if not transcript:
-        log.warning("[Pipeline] Transcript vide, abandon")
+        log.warning("[Pipeline] Transcript vide, abandon (audio=%.2fs rms=%.4f)", duration_s, rms_audio)
         return
     log.info("[Pipeline] Transcript: %r", transcript)
 
