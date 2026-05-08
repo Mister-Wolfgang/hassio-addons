@@ -1,0 +1,68 @@
+name: Bump addon version
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '*/config.yaml'
+      - '*/Dockerfile'
+      - '**/*.py'
+      - '**/*.sh'
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Detect changed addons and bump versions
+        run: |
+          bump_addon() {
+            local DIR="$1"
+            local FILE="$DIR/config.yaml"
+            local DOCKERFILE="$DIR/Dockerfile"
+
+            [ -f "$FILE" ] || return
+            grep -q '^version:' "$FILE" || return
+
+            CURRENT=$(grep '^version:' "$FILE" | sed 's/version: *"\?\([0-9][0-9.]*\)"\?/\1/')
+            MAJOR=$(echo "$CURRENT" | cut -d. -f1)
+            MINOR=$(echo "$CURRENT" | cut -d. -f2)
+            PATCH=$(echo "$CURRENT" | cut -d. -f3)
+            NEW="$MAJOR.$MINOR.$((PATCH + 1))"
+
+            sed -i "s/^version:.*/version: \"$NEW\"/" "$FILE"
+            [ -f "$DOCKERFILE" ] && sed -i "s/io\.hass\.version=\"[^\"]*\"/io.hass.version=\"$NEW\"/" "$DOCKERFILE"
+            echo "Bumped $DIR: $CURRENT → $NEW"
+          }
+
+          # Fichiers modifiés dans ce push (ignore les commits [skip ci])
+          git diff --name-only HEAD~1 HEAD 2>/dev/null > changed_files.txt || \
+            git diff --name-only HEAD changed_files.txt
+
+          # Extraire les dossiers addon uniques (premier niveau, avec config.yaml)
+          ADDONS=$(grep -oP '^[^/]+' changed_files.txt | sort -u)
+
+          for ADDON in $ADDONS; do
+            # Ignorer les dossiers non-addon (.github, etc.)
+            [ -f "$ADDON/config.yaml" ] || continue
+            # Ignorer si le seul changement est un bump de version (évite boucle)
+            if git diff --name-only HEAD~1 HEAD 2>/dev/null | grep -q "^$ADDON/" && \
+               ! git log -1 --pretty=%s | grep -q '\[skip ci\]'; then
+              bump_addon "$ADDON"
+            fi
+          done
+
+      - name: Commit version bumps
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --staged --quiet || git commit -m "chore: bump version [skip ci]" && git push || true
