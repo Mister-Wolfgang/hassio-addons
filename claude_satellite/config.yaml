@@ -36,7 +36,7 @@ options:
   tts_voice: ""
   tts_language: "fr"
   arenti_talk_url: "http://homeassistant:8080"
-  claude_bridge_url: "http://172.30.32.2:9099"
+  claude_bridge_url: "http://192.168.1.131:9099"
   cameras: []
 
 schema:
