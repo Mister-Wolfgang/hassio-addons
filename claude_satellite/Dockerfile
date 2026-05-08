@@ -9,7 +9,11 @@ RUN apk add --no-cache \
     pkgconf \
     libffi-dev \
     openssl-dev \
-    cython
+    cython \
+    nodejs \
+    npm
+
+RUN npm install -g @anthropic-ai/claude-code
 
 WORKDIR /app
 COPY requirements.txt .

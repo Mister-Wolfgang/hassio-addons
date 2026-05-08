@@ -1,29 +1,35 @@
-"""Appel Claude via le bridge HTTP sur iaserver (claude CLI compte Max)."""
+"""Appel Claude Code CLI (compte Max) directement dans le container addon."""
+import asyncio
 import json
 import logging
 import os
-
-import httpx
+import re
 
 log = logging.getLogger(__name__)
 
 HA_URL = "http://supervisor/core"
 HA_TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
+CLAUDE_BIN = "/usr/local/bin/claude"
 
 SYSTEM_PROMPT = f"""Tu es l'assistant domotique de cette maison. Tu réponds en français, de façon concise (réponse vocale TTS).
 
-Pour contrôler Home Assistant, utilise l'outil bash avec curl :
+Tu as accès complet à Home Assistant via bash. Utilise curl pour agir :
+
+  # Lire tous les états
+  curl -s http://supervisor/core/api/states \\
+    -H "Authorization: Bearer {HA_TOKEN}"
+
   # Appeler un service
-  curl -s -X POST {HA_URL}/api/services/{{domain}}/{{service}} \\
+  curl -s -X POST http://supervisor/core/api/services/{{domain}}/{{service}} \\
     -H "Authorization: Bearer {HA_TOKEN}" \\
     -H "Content-Type: application/json" \\
     -d '{{"entity_id": "light.salon"}}'
 
-  # Lire un état
-  curl -s {HA_URL}/api/states/{{entity_id}} \\
+  # Lire un état précis
+  curl -s http://supervisor/core/api/states/light.salon \\
     -H "Authorization: Bearer {HA_TOKEN}"
 
-Après avoir agi, termine ta réponse par exactement cette ligne :
+Après avoir agi, termine TOUJOURS par :
 RÉPONSE_VOCALE: <texte court à lire à voix haute>
 """
 
@@ -42,7 +48,7 @@ def _build_prompt(transcript: str, context: dict) -> str:
         for s in context.get("ha_states", [])
     )
 
-    return f"""## Caméras disponibles
+    return f"""## Caméras / Pièces
 {cameras_lines}
 
 ## Signaux audio au moment du wake word
@@ -52,32 +58,55 @@ def _build_prompt(transcript: str, context: dict) -> str:
 ## Événements Frigate (30 dernières secondes)
 {events_json}
 
-## États Home Assistant
+## États Home Assistant actuels
 {states_lines}
 
 ---
 Commande vocale reçue : "{transcript}"
 
-Raisonne sur les signaux pour identifier qui a parlé et depuis quelle pièce, puis réponds et agis.
+Identifie qui a parlé et depuis quelle pièce, puis réponds et agis sur HA si nécessaire.
 """
 
 
-async def handle(transcript: str, context: dict, bridge_url: str) -> str:
-    """Envoie le prompt au bridge Claude sur iaserver, retourne le texte TTS."""
+async def handle(transcript: str, context: dict, **_) -> str:
+    """Appelle claude CLI dans le container, retourne le texte TTS."""
     prompt = _build_prompt(transcript, context)
 
+    env = {
+        **os.environ,
+        "HOME": "/data",  # credentials dans /data/.claude/ — persiste entre redémarrages
+    }
+
     try:
-        async with httpx.AsyncClient() as c:
-            r = await c.post(
-                f"{bridge_url}/ask",
-                json={"system": SYSTEM_PROMPT, "prompt": prompt},
-                timeout=90,
-            )
-            r.raise_for_status()
-            data = r.json()
-            tts = data.get("tts", "")
-            log.info("Réponse Claude: %r", tts)
-            return tts
-    except Exception as e:
-        log.error("Bridge error: %s", e)
+        proc = await asyncio.create_subprocess_exec(
+            CLAUDE_BIN,
+            "--system-prompt", SYSTEM_PROMPT,
+            "--allowedTools", "bash",
+            "--permission-mode", "bypassPermissions",
+            "-p", prompt,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+    except asyncio.TimeoutError:
+        proc.kill()
+        log.error("claude timeout")
         return ""
+    except Exception as e:
+        log.error("claude exec error: %s", e)
+        return ""
+
+    if proc.returncode != 0:
+        log.error("claude exit %d: %s", proc.returncode, stderr.decode()[:300])
+        return ""
+
+    output = stdout.decode()
+    log.debug("claude output: %s", output[:500])
+
+    match = re.search(r"RÉPONSE_VOCALE\s*:\s*(.+)", output, re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+
+    lines = [l.strip() for l in output.splitlines() if l.strip()]
+    return lines[-1] if lines else ""
