@@ -18,6 +18,11 @@ async def read_event(reader: asyncio.StreamReader) -> dict:
     if not line:
         raise EOFError("Wyoming connection closed")
     header = json.loads(line.decode())
+    # Wyoming ≥1.8: data JSON envoyé en blob séparé après le header
+    data_len = header.get("data_length", 0)
+    if data_len:
+        data_bytes = await reader.readexactly(data_len)
+        header["data"] = json.loads(data_bytes.decode())
     payload_len = header.get("payload_length", 0)
     if payload_len:
         header["_payload"] = await reader.readexactly(payload_len)
