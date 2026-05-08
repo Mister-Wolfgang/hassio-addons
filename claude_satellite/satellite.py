@@ -157,22 +157,8 @@ class WyomingWakeWordDetector:
 
     async def _connect(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         reader, writer = await asyncio.open_connection(self.host, self.port)
-
-        # 1) Describe → info pour logger les modèles dispo
-        writer.write(_wyoming_encode("describe", {}))
-        await writer.drain()
-        try:
-            evt_type, data, _ = await asyncio.wait_for(_wyoming_read_event(reader), timeout=3.0)
-            if evt_type == "info":
-                wake_models = data.get("wake", [])
-                names = [m.get("name") for m in wake_models]
-                log.info("Wyoming OWW info — wake words disponibles: %s", names)
-        except asyncio.TimeoutError:
-            log.warning("Wyoming OWW: pas de réponse à describe (timeout 3s)")
-
-        # 2) detect — requis pour que OWW démarre la détection
+        # detect → audio-start (protocole minimal Wyoming wake word)
         writer.write(_wyoming_encode("detect", {}))
-        # 3) audio-start
         writer.write(_wyoming_encode("audio-start", {
             "rate": RATE, "width": WIDTH, "channels": CHANNELS,
         }))
@@ -189,6 +175,7 @@ class WyomingWakeWordDetector:
                 log.warning("Wyoming OWW: reader error: %s", e)
                 return  # signal déconnexion
 
+            log.debug("OWW event reçu: type=%s data=%s", evt_type, data)
             if evt_type != "detection":
                 continue
 
