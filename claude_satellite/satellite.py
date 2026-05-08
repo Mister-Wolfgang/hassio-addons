@@ -1,12 +1,11 @@
 """Multi-mic satellite: surveille tous les streams caméras pour le wake word."""
 import asyncio
+import concurrent.futures
 import logging
 import time
 from dataclasses import dataclass, field
 
 import numpy as np
-
-from wyoming_proto import WyomingClient
 
 log = logging.getLogger(__name__)
 
@@ -125,117 +124,92 @@ class CameraStream:
             await asyncio.sleep(3)
 
 
-class WakeWordWatcher:
-    """Connecte un stream caméra à openWakeWord et signale les détections."""
+class LocalWakeWordDetector:
+    """Détection de wake word locale via openwakeword Python lib (sans Wyoming)."""
 
-    def __init__(
-        self,
-        stream: CameraStream,
-        wake_uri: str,
-        wake_word: str,
-        on_detect,
-        all_streams: dict[str, CameraStream],
-    ):
-        self.stream = stream
-        self.wake_uri = wake_uri
+    OWW_CHUNK = 1280  # 80ms à 16000Hz — taille standard openwakeword
+
+    def __init__(self, streams: dict[str, "CameraStream"], wake_word: str, on_detect, threshold: float = 0.5):
+        self.streams = streams
         self.wake_word = wake_word.lower()
         self.on_detect = on_detect
-        self.all_streams = all_streams
+        self.threshold = threshold
         self._last_detect = 0.0
 
-    async def _send_audio(self, client: WyomingClient, audio_q: asyncio.Queue):
-        await client.send("audio-start", {"rate": RATE, "width": WIDTH, "channels": CHANNELS})
-        n = 0
-        while True:
-            chunk = await audio_q.get()
-            await client.send(
-                "audio-chunk",
-                {"rate": RATE, "width": WIDTH, "channels": CHANNELS},
-                payload=chunk,
-            )
-            n += 1
-            if n % 100 == 0:  # toutes les ~10s
-                log.info("[%s] Audio→OWW: %d chunks, rms=%.4f", self.stream.camera.name, n, self.stream.rms)
-
-    async def _recv_detections(self, client: WyomingClient):
-        while True:
-            try:
-                evt = await asyncio.wait_for(client.recv(), timeout=15.0)
-            except asyncio.TimeoutError:
-                log.warning("[%s] OWW silencieux depuis 15s — aucun event reçu", self.stream.camera.name)
-                continue
-            evt_type = evt.get("type")
-            # Log ALL events from OWW for diagnosis
-            log.info("[%s] OWW← %s | %s", self.stream.camera.name, evt_type, evt.get("data"))
-
-            if evt_type != "detection":
-                continue
-
-            data = evt.get("data", {})
-            name = str(data.get("name", "")).lower()
-            score = float(data.get("score", 1.0))
-
-            now = time.monotonic()
-            if now - self._last_detect < PIPELINE_DEBOUNCE_S:
-                log.info("[%s] Detection ignorée (debounce): name=%s", self.stream.camera.name, name)
-                continue
-            self._last_detect = now
-
-            if self.wake_word not in name:
-                log.info("[%s] Detection ignorée (nom=%s, attendu=%s)", self.stream.camera.name, name, self.wake_word)
-                continue
-
-            log.info("[%s] Wake word! score=%.2f rms=%.3f", self.stream.camera.name, score, self.stream.rms)
-
-            event = WakeEvent(
-                camera=self.stream.camera,
-                ww_score=score,
-                rms=self.stream.rms,
-                timestamp=now,
-                all_scores={self.stream.camera.name: score},
-                all_rms={n: s.rms for n, s in self.all_streams.items()},
-            )
-            asyncio.ensure_future(self.on_detect(event))
-
-    async def _handshake(self, client: WyomingClient):
-        """Attend l'info proactif d'OWW (comme HA satellite), puis envoie detect."""
-        # OWW pousse info proactivement à la connexion — on lit les events jusqu'à l'obtenir
-        try:
-            for _ in range(3):
-                evt = await asyncio.wait_for(client.recv(), timeout=3.0)
-                evt_type = evt.get("type")
-                log.info("[%s] OWW init event: %s | %s", self.stream.camera.name, evt_type, evt.get("data"))
-                if evt_type == "info":
-                    # Afficher les modèles disponibles (structure: wake[].models[].name)
-                    wake_programs = evt.get("data", {}).get("wake", [])
-                    for prog in wake_programs:
-                        models = [m.get("name") for m in prog.get("models", [])]
-                        log.info("[%s] OWW programme '%s' models: %s", self.stream.camera.name, prog.get("name"), models)
-                    break
-        except asyncio.TimeoutError:
-            log.info("[%s] OWW: pas d'info initial reçu, on continue quand même", self.stream.camera.name)
-        # Envoyer detect avec le nom configuré
-        await client.send("detect", {"names": [self.wake_word]})
-        log.info("[%s] detect envoyé pour '%s'", self.stream.camera.name, self.wake_word)
-
     async def run(self):
-        while True:
-            audio_q = None
-            try:
-                async with WyomingClient(self.wake_uri) as client:
-                    log.info("[%s] Connecté à openWakeWord ✓", self.stream.camera.name)
-                    await self._handshake(client)
-                    audio_q = self.stream.subscribe()
-                    await asyncio.gather(
-                        self._send_audio(client, audio_q),
-                        self._recv_detections(client),
+        from openwakeword.model import Model
+
+        loop = asyncio.get_event_loop()
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+
+        log.info("LocalWakeWord: chargement modèle '%s'...", self.wake_word)
+        model = await loop.run_in_executor(executor, lambda: Model(wakeword_models=[self.wake_word]))
+        log.info("LocalWakeWord: modèle '%s' prêt ✓", self.wake_word)
+
+        queues = {name: stream.subscribe() for name, stream in self.streams.items()}
+        buffers: dict[str, bytearray] = {name: bytearray() for name in self.streams}
+        n_chunks = 0
+
+        try:
+            while True:
+                # Drainer toutes les queues dans les buffers
+                got = False
+                for name, q in queues.items():
+                    while True:
+                        try:
+                            buffers[name].extend(q.get_nowait())
+                            got = True
+                        except asyncio.QueueEmpty:
+                            break
+
+                # Trouver la caméra avec le plus de données et la plus forte RMS
+                ready = [n for n, b in buffers.items() if len(b) >= self.OWW_CHUNK * 2]
+                if not ready:
+                    await asyncio.sleep(0.02)
+                    continue
+
+                src = max(ready, key=lambda n: self.streams[n].rms)
+                audio_bytes = bytes(buffers[src][:self.OWW_CHUNK * 2])
+                del buffers[src][:self.OWW_CHUNK * 2]
+
+                audio = np.frombuffer(audio_bytes, dtype=np.int16)
+                predictions = await loop.run_in_executor(executor, model.predict, audio)
+
+                n_chunks += 1
+                if n_chunks % 125 == 0:  # ~10s
+                    scores = {k: f"{v:.3f}" for k, v in predictions.items()}
+                    log.info("LocalWW: src=%s rms=%.4f scores=%s", src, self.streams[src].rms, scores)
+
+                for ww_name, score in predictions.items():
+                    score = float(score)
+                    if score < self.threshold:
+                        continue
+                    now = time.monotonic()
+                    if now - self._last_detect < PIPELINE_DEBOUNCE_S:
+                        continue
+                    self._last_detect = now
+
+                    best = max(self.streams, key=lambda n: self.streams[n].rms)
+                    best_stream = self.streams[best]
+                    log.info("Wake word! name=%s score=%.2f source=%s rms=%.3f",
+                             ww_name, score, best, best_stream.rms)
+
+                    event = WakeEvent(
+                        camera=best_stream.camera,
+                        ww_score=score,
+                        rms=best_stream.rms,
+                        timestamp=now,
+                        all_scores={best: score},
+                        all_rms={n: s.rms for n, s in self.streams.items()},
                     )
-            except Exception as e:
-                log.error("[%s] WakeWord error: %s", self.stream.camera.name, e)
-            finally:
-                if audio_q is not None:
-                    self.stream.unsubscribe(audio_q)
-            await asyncio.sleep(3)
+                    asyncio.ensure_future(self.on_detect(event))
+
+        except Exception as e:
+            log.error("LocalWakeWord error: %s", e, exc_info=True)
+        finally:
+            for name, q in queues.items():
+                self.streams[name].unsubscribe(q)
+            executor.shutdown(wait=False)
 
 
 class MultiMicSatellite:
@@ -255,19 +229,13 @@ class MultiMicSatellite:
         for name, stream in self.streams.items():
             tasks.append(asyncio.create_task(stream.run(), name=f"stream-{name}"))
 
-        # TEST: une seule connexion OWW sur la première caméra pour vérifier que
-        # la détection fonctionne. Si ça marche → on passe en mixing multi-cam.
-        if self.streams:
-            first_stream = next(iter(self.streams.values()))
-            watcher = WakeWordWatcher(
-                stream=first_stream,
-                wake_uri=self.config["wyoming_wake_uri"],
-                wake_word=self.config["wake_word"],
-                on_detect=self._on_wake,
-                all_streams=self.streams,
-            )
-            tasks.append(asyncio.create_task(watcher.run(), name="watcher-single"))
-            log.info("WakeWord: connexion unique OWW sur '%s' (test)", first_stream.camera.name)
+        detector = LocalWakeWordDetector(
+            streams=self.streams,
+            wake_word=self.config["wake_word"],
+            on_detect=self._on_wake,
+            threshold=float(self.config.get("wake_word_threshold", 0.5)),
+        )
+        tasks.append(asyncio.create_task(detector.run(), name="local-wakeword"))
 
         log.info("MultiMicSatellite ready — %d cameras", len(self.cameras))
         await asyncio.gather(*tasks)

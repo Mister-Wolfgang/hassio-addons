@@ -11,14 +11,18 @@ RUN apk add --no-cache \
     openssl-dev \
     cython \
     nodejs \
-    npm
+    npm \
+    gcompat \
+    libstdc++ \
+    libgcc
 
 RUN npm install -g @anthropic-ai/claude-code
 
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir cython && \
-    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir -r requirements.txt && \
+    python -c "from openwakeword.model import Model; Model(wakeword_models=['hey_jarvis']); print('OWW model hey_jarvis downloaded')"
 
 COPY . .
 COPY run.sh /run.sh
