@@ -7,7 +7,7 @@ import re
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, HTMLResponse, StreamingResponse
 
 from satellite import MultiMicSatellite, CameraConfig
@@ -20,6 +20,7 @@ log = logging.getLogger(__name__)
 
 OPTIONS_PATH = os.environ.get("OPTIONS_PATH", "/data/options.json")
 _satellite: MultiMicSatellite | None = None
+_login_pty_fd: int | None = None  # master_fd du PTY de login en cours
 
 
 def _load_config() -> dict:
@@ -199,7 +200,7 @@ async function startLogin() {
   es.onmessage = function(e) {
     const d = JSON.parse(e.data);
     if (d.url) {
-      box.innerHTML = `🔗 Ouvre ce lien dans ton navigateur :<br><div id="url-box"><a href="${d.url}" target="_blank">${d.url}</a></div><br><span class="spinner"></span> En attente de confirmation…`;
+      box.innerHTML = `🔗 Ouvre ce lien dans ton navigateur :<br><div id="url-box"><a href="${d.url}" target="_blank">${d.url}</a></div><br><br>Puis colle le code de la page de confirmation :<br><input id="code-input" type="text" placeholder="p9kMbh..." style="width:100%;padding:8px;margin-top:8px;background:#0f1117;color:#e2e8f0;border:1px solid #475569;border-radius:6px;font-size:.9rem"><br><button onclick="submitCode()" style="margin-top:8px;background:#6366f1;color:white;border:none;padding:8px 20px;border-radius:6px;cursor:pointer">Envoyer le code</button><br><br><span class="spinner"></span> En attente…`;
     } else if (d.status === 'ok') {
       es.close();
       box.className = 'success'; box.innerHTML = `✅ Connecté ! L'assistant vocal est actif.`;
@@ -215,6 +216,11 @@ async function startLogin() {
     box.className = 'error'; box.innerHTML = '❌ Connexion perdue.';
     btn.disabled = false;
   };
+}
+async function submitCode() {
+  const code = document.getElementById('code-input').value.trim();
+  if (!code) return;
+  await fetch('/login/code', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({code})});
 }
 </script>
 </body>
@@ -233,8 +239,10 @@ async def login_stream():
         import select
         import subprocess
 
+        global _login_pty_fd
         env = {**os.environ, "HOME": "/data"}
         master_fd, slave_fd = pty.openpty()
+        _login_pty_fd = master_fd
         proc = None
         try:
             proc = subprocess.Popen(
@@ -316,6 +324,7 @@ async def login_stream():
             log.exception("login stream error")
             yield f"data: {json.dumps({'status': 'error', 'msg': str(e)})}\n\n"
         finally:
+            _login_pty_fd = None
             try:
                 os.close(master_fd)
             except OSError:
@@ -325,6 +334,20 @@ async def login_stream():
 
     return StreamingResponse(generator(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.post("/login/code")
+async def login_code(request: Request):
+    global _login_pty_fd
+    body = await request.json()
+    code = (body.get("code") or "").strip()
+    if not code or _login_pty_fd is None:
+        return JSONResponse({"ok": False, "error": "no active login session"})
+    try:
+        os.write(_login_pty_fd, (code + "\r").encode())
+        return JSONResponse({"ok": True})
+    except OSError as e:
+        return JSONResponse({"ok": False, "error": str(e)})
 
 
 @app.get("/")
