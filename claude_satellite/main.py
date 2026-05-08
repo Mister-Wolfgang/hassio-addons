@@ -229,35 +229,66 @@ async def login_page():
 @app.get("/login/stream")
 async def login_stream():
     async def generator():
+        import pty
+        import select
+        import subprocess
+        import signal
+
         env = {**os.environ, "HOME": "/data"}
+        master_fd, slave_fd = pty.openpty()
+        proc = None
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "/usr/local/bin/claude", "login",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                env=env,
+            proc = subprocess.Popen(
+                ["/usr/local/bin/claude"],
+                stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
+                env=env, close_fds=True,
             )
+            os.close(slave_fd)
+
+            buf = ""
             url_sent = False
-            while True:
-                line = await asyncio.wait_for(proc.stdout.readline(), timeout=120)
-                if not line:
+            deadline = asyncio.get_event_loop().time() + 180
+
+            while proc.poll() is None:
+                await asyncio.sleep(0.05)
+                if asyncio.get_event_loop().time() > deadline:
+                    proc.terminate()
+                    yield f"data: {json.dumps({'status': 'error', 'msg': 'timeout'})}\n\n"
+                    return
+
+                r, _, _ = select.select([master_fd], [], [], 0)
+                if not r:
+                    continue
+                try:
+                    chunk = os.read(master_fd, 4096).decode("utf-8", errors="replace")
+                except OSError:
                     break
-                text = line.decode(errors="replace").strip()
-                log.info("claude login: %s", text)
+                # Strip ANSI escape codes
+                clean = re.sub(r"\x1b\[[0-9;]*[mABCDHfJKST]|\x1b\].*?\x07|\r", "", chunk)
+                buf += clean
+                log.info("claude pty: %s", clean.strip()[:200])
+
                 if not url_sent:
-                    m = re.search(r"https://[^\s]+", text)
+                    m = re.search(r"https://[^\s\x00-\x1f]+", buf)
                     if m:
                         url_sent = True
                         yield f"data: {json.dumps({'url': m.group(0)})}\n\n"
-            await proc.wait()
+
+            proc.wait()
             if proc.returncode == 0:
                 yield f"data: {json.dumps({'status': 'ok'})}\n\n"
             else:
                 yield f"data: {json.dumps({'status': 'error', 'msg': f'exit {proc.returncode}'})}\n\n"
-        except asyncio.TimeoutError:
-            yield f"data: {json.dumps({'status': 'error', 'msg': 'timeout'})}\n\n"
         except Exception as e:
+            log.exception("login stream error")
             yield f"data: {json.dumps({'status': 'error', 'msg': str(e)})}\n\n"
+        finally:
+            try:
+                os.close(master_fd)
+            except OSError:
+                pass
+            if proc and proc.poll() is None:
+                proc.terminate()
 
     return StreamingResponse(generator(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
