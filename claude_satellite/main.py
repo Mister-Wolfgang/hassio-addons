@@ -313,9 +313,10 @@ async def login_stream():
                                         "you are now", "session started", "✓", "✔",
                                         "claude >", "claude>")
                     if any(p in low for p in success_patterns):
-                        log.info("login: succès détecté")
+                        log.info("login: succès détecté — attente écriture credentials")
                         login_ok = True
                         key_task.cancel()
+                        await asyncio.sleep(4)  # laisser claude écrire le token sur disque
                         proc.terminate()
                         yield f"data: {json.dumps({'status': 'ok'})}\n\n"
                         return
