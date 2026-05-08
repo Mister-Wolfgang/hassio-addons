@@ -134,7 +134,12 @@ def _wyoming_encode(event_type: str, data: dict, payload: bytes = b"") -> bytes:
 async def _wyoming_read_event(reader: asyncio.StreamReader) -> tuple[str, dict, bytes]:
     """Lit un event Wyoming depuis un StreamReader."""
     line = await reader.readline()
-    header = json.loads(line)
+    line_str = line.decode().strip()
+    try:
+        header = json.loads(line_str)
+    except json.JSONDecodeError:
+        # OWW concatène parfois deux JSON sur une ligne — parser seulement le premier
+        header, _ = json.JSONDecoder().raw_decode(line_str)
     payload = b""
     if header.get("payload_length", 0) > 0:
         payload = await reader.readexactly(header["payload_length"])
@@ -289,10 +294,19 @@ class MultiMicSatellite:
         async with self._pipeline_lock:
             try:
                 from pipeline import run_full_pipeline
+                # Injecter les caméras découvertes si config ne les a pas
+                config = dict(self.config)
+                if not config.get("cameras"):
+                    config["cameras"] = [
+                        {"name": c.name, "room": c.room,
+                         "frigate_camera": c.frigate_camera,
+                         "talkback_camera": c.talkback_camera}
+                        for c in self.cameras
+                    ]
                 await run_full_pipeline(
                     wake_event=event,
                     streams=self.streams,
-                    config=self.config,
+                    config=config,
                 )
             except Exception as e:
                 log.error("Pipeline error: %s", e, exc_info=True)

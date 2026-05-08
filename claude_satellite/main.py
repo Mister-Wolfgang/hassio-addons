@@ -128,7 +128,13 @@ async def lifespan(app: FastAPI):
     else:
         log.info("Auto-découverte des caméras Frigate via l'API HA...")
         cameras = await _discover_cameras(go2rtc_rtsp)
-        if not cameras:
+        if cameras:
+            # Déduire l'URL Frigate HTTP depuis la même IP que go2rtc
+            rtsp_host = go2rtc_rtsp.replace("rtsp://", "").split(":")[0]
+            if rtsp_host not in ("homeassistant", "localhost"):
+                config.setdefault("frigate_url", f"http://{rtsp_host}:5000")
+                log.info("Frigate URL: %s", config["frigate_url"])
+        else:
             log.warning("Aucune caméra Frigate trouvée — satellite inactif")
 
     _satellite = MultiMicSatellite(cameras=cameras, config=config)
