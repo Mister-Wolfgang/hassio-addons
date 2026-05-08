@@ -1,1 +1,1 @@
-claude_satellite/wyoming_proto.py
+claude_satellite/pipeline.py
