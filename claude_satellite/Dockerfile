@@ -1,16 +1,33 @@
 ARG BUILD_FROM
 FROM ${BUILD_FROM}
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apk add --no-cache \
     ffmpeg \
+    gcc \
+    musl-dev \
     nodejs \
     npm \
-    gcc \
-    && rm -rf /var/lib/apt/lists/*
+    gcompat \
+    libstdc++ \
+    libgcc
 
 RUN npm install -g @anthropic-ai/claude-code
 
 WORKDIR /app
+
+# onnxruntime n'a pas de wheel musllinux — on télécharge le wheel manylinux
+# et on l'installe manuellement (fonctionne grâce à gcompat sur Alpine)
+RUN pip download onnxruntime \
+        --platform manylinux_2_17_x86_64 \
+        --python-version 312 \
+        --implementation cp \
+        --abi cp312 \
+        --only-binary :all: \
+        --index-url https://pypi.org/simple \
+        -d /tmp/oww_wheels \
+    && pip install --no-deps /tmp/oww_wheels/onnxruntime-*.whl \
+    && rm -rf /tmp/oww_wheels
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt && \
     python -c "from openwakeword.model import Model; Model(wakeword_models=['hey_jarvis']); print('OWW model hey_jarvis downloaded')"
