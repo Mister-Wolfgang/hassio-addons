@@ -51,6 +51,7 @@ class ClaudeSession:
             return ""
 
         buf = ""
+        last_log_len = 0
         deadline = asyncio.get_event_loop().time() + timeout
         while asyncio.get_event_loop().time() < deadline:
             await asyncio.sleep(0.05)
@@ -64,11 +65,15 @@ class ClaudeSession:
             clean = re.sub(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])", "", chunk)
             clean = re.sub(r"[\x00-\x1f\x7f]", " ", clean)
             buf += clean
+            # Log périodique pour voir ce que Claude écrit
+            if len(buf) - last_log_len > 500:
+                last_log_len = len(buf)
+                log.debug("Claude output (buf=%d): %r", len(buf), buf[-300:])
             m = re.search(r"RÉPONSE_VOCALE\s*:\s*(.+)", buf, re.IGNORECASE)
             if m:
                 log.info("ClaudeSession réponse: %r", m.group(1).strip())
                 return m.group(1).strip()
-        log.warning("ClaudeSession timeout après %.0fs", timeout)
+        log.warning("ClaudeSession timeout après %.0fs — dernier output: %r", timeout, buf[-500:])
         return ""
 
     def close(self):
