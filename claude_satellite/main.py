@@ -367,32 +367,33 @@ async def login_stream():
                 buf += clean
                 log.info("claude pty: %s", repr(clean.strip()[:300]))
 
+                searchable = re.sub(r"[\x00-\x1f\x7f]", "", buf)
+
                 if not url_sent:
-                    # Supprimer les caractères de contrôle restants avant de chercher l'URL
-                    searchable = re.sub(r"[\x00-\x1f\x7f]", "", buf)
                     m = re.search(r"https://\S{20,}", searchable)
                     if m:
                         url_sent = True
-                        buf = ""  # reset: ne chercher le succès que dans le texte POST-URL
+                        buf = ""
                         yield f"data: {json.dumps({'url': m.group(0).rstrip('.')})}\n\n"
-                        continue  # pas de check succès dans ce même chunk
+                        continue
 
-                # Détecte le succès du login dans le texte (uniquement sur output post-URL)
-                if url_sent and not login_ok:
-                    low = re.sub(r"[\x00-\x1f\x7f]", "", buf).lower()
+                # Détecte le succès : après URL (OAuth) OU directement (keyring déjà rempli)
+                if not login_ok:
+                    low = searchable.lower()
                     success_patterns = ("logged in", "authenticated", "welcome back",
                                         "signed in", "login successful",
                                         "you are now", "session started",
                                         "claude >", "claude>",
-                                        "*" * 20)  # animation de validation OAuth
+                                        "*" * 20)
                     if any(p in low for p in success_patterns):
-                        log.info("login: succès — session claude conservée en mémoire")
+                        log.info("login: succès (keyring=%s) — session conservée en mémoire",
+                                 "existant" if not url_sent else "nouveau")
                         login_ok = True
                         key_task.cancel()
-                        await asyncio.sleep(2)  # laisser claude atteindre le prompt
+                        await asyncio.sleep(2)
                         _claude_session = ClaudeSession(master_fd, proc)
                         yield f"data: {json.dumps({'status': 'ok'})}\n\n"
-                        return  # proc et master_fd restent ouverts (session persistante)
+                        return
 
             key_task.cancel()
             if login_ok or proc.returncode == 0:
