@@ -282,9 +282,32 @@ async def login_stream():
                             "login successful", "logged in", "authenticated")):
                         login_ok = True
                         key_task.cancel()
-                        log.info("login: succès OAuth — credentials dans le keyring")
-                        # Tuer le processus claude (on n'a plus besoin de la session TUI)
-                        await asyncio.sleep(0.5)
+                        log.info("login: succès OAuth — passage des écrans 'Press Enter'")
+                        key_task.cancel()
+                        # Passer tous les écrans "Press Enter to continue" restants
+                        enter_deadline = asyncio.get_event_loop().time() + 20
+                        last_enter = asyncio.get_event_loop().time()
+                        screen_buf = ""
+                        while asyncio.get_event_loop().time() < enter_deadline:
+                            await asyncio.sleep(0.05)
+                            r2, _, _ = select.select([master_fd], [], [], 0)
+                            if r2:
+                                try:
+                                    c2 = os.read(master_fd, 4096).decode("utf-8", errors="replace")
+                                    c2 = re.sub(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])", "", c2)
+                                    c2 = re.sub(r"[\x00-\x1f\x7f]", "", c2)
+                                    screen_buf += c2
+                                    log.info("login setup: %s", repr(c2.strip()[:100]))
+                                except OSError:
+                                    break
+                            if "press enter to continue" in screen_buf.lower():
+                                os.write(master_fd, b"\r")
+                                screen_buf = ""
+                                last_enter = asyncio.get_event_loop().time()
+                            elif asyncio.get_event_loop().time() - last_enter > 3.0:
+                                break  # plus d'écran depuis 3s
+                        log.info("login: credentials sauvegardés — arrêt claude")
+                        login_ok = True
                         proc.terminate()
                         yield f"data: {json.dumps({'status': 'ok'})}\n\n"
                         return
