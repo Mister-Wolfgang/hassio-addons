@@ -156,12 +156,16 @@ class WakeWordWatcher:
     async def _recv_detections(self, client: WyomingClient):
         while True:
             evt = await client.recv()
-            if evt.get("type") != "detection":
+            evt_type = evt.get("type")
+            if evt_type != "detection":
+                log.debug("[%s] OWW event: %s", self.stream.camera.name, evt_type)
                 continue
 
             data = evt.get("data", {})
             name = str(data.get("name", "")).lower()
             score = float(data.get("score", 1.0))
+
+            log.debug("[%s] Detection: name=%s score=%.2f", self.stream.camera.name, name, score)
 
             if self.wake_word not in name:
                 continue
@@ -183,12 +187,29 @@ class WakeWordWatcher:
             )
             asyncio.ensure_future(self.on_detect(event))
 
+    async def _handshake(self, client: WyomingClient):
+        """Attend le info de openWakeWord, puis envoie detect pour activer l'écoute."""
+        # Lire les events initiaux jusqu'à recevoir info
+        for _ in range(5):
+            evt = await asyncio.wait_for(client.recv(), timeout=5)
+            evt_type = evt.get("type")
+            log.debug("[%s] Handshake event: %s", self.stream.camera.name, evt_type)
+            if evt_type == "info":
+                models = evt.get("data", {}).get("wake", [])
+                available = [m.get("name", "") for m in models]
+                log.info("[%s] OWW models disponibles: %s", self.stream.camera.name, available)
+                break
+        # Envoyer detect pour activer la détection
+        await client.send("detect", {"names": [self.wake_word]})
+        log.info("[%s] detect envoyé pour '%s'", self.stream.camera.name, self.wake_word)
+
     async def run(self):
         while True:
             audio_q = None
             try:
                 async with WyomingClient(self.wake_uri) as client:
                     log.info("[%s] Connecté à openWakeWord ✓", self.stream.camera.name)
+                    await self._handshake(client)
                     audio_q = self.stream.subscribe()
                     await asyncio.gather(
                         self._send_audio(client, audio_q),
