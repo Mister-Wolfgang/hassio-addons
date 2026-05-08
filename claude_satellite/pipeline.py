@@ -42,11 +42,13 @@ async def _stt(audio_data: bytes, stt_uri: str, language: str = "fr") -> str:
         for _ in range(120):
             evt = await asyncio.wait_for(c.recv(), timeout=10)
             t = evt.get("type")
-            log.debug("STT event: %s %s", t, evt.get("data"))
+            log.debug("STT event: %s", {k: v for k, v in evt.items() if k != "_payload"})
             if t == "transcript":
-                return (evt.get("data") or {}).get("text", "").strip()
+                # Wyoming inline format: {"type": "transcript", "text": "..."}
+                text = evt.get("text") or (evt.get("data") or {}).get("text", "")
+                return text.strip()
             if t == "error":
-                log.error("STT error: %s", evt.get("data"))
+                log.error("STT error: %s", evt)
                 return ""
 
     return ""

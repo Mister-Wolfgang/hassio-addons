@@ -30,10 +30,10 @@ async def write_event(
     data: dict | None = None,
     payload: bytes | None = None,
 ) -> None:
-    # Format standard Wyoming : data inline dans le header JSON
+    # Format standard Wyoming : champs data directement inline dans le header (pas imbriqués sous "data")
     header: dict = {"type": type_}
     if data:
-        header["data"] = data
+        header.update(data)
     if payload:
         header["payload_length"] = len(payload)
     writer.write((json.dumps(header) + "\n").encode())
