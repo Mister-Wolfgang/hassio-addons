@@ -193,20 +193,20 @@ async function startLogin() {
   const box = document.getElementById('status');
   btn.disabled = true;
   box.className = 'waiting'; box.style.display = 'block';
-  box.innerHTML = '<span class="spinner"></span> Démarrage…';
+  box.innerHTML = `<span class="spinner"></span> Démarrage…`;
 
   const es = new EventSource('/login/stream');
   es.onmessage = function(e) {
     const d = JSON.parse(e.data);
     if (d.url) {
-      box.innerHTML = '🔗 Ouvre ce lien dans ton navigateur :<br><div id="url-box"><a href="' + d.url + '" target="_blank">' + d.url + '</a></div><br><span class="spinner"></span> En attente de confirmation…';
+      box.innerHTML = `🔗 Ouvre ce lien dans ton navigateur :<br><div id="url-box"><a href="${d.url}" target="_blank">${d.url}</a></div><br><span class="spinner"></span> En attente de confirmation…`;
     } else if (d.status === 'ok') {
       es.close();
-      box.className = 'success'; box.innerHTML = '✅ Connecté ! L\'assistant vocal est actif.';
-      btn.textContent = 'Reconnecté ✓'; btn.disabled = false;
+      box.className = 'success'; box.innerHTML = `✅ Connecté ! L'assistant vocal est actif.`;
+      btn.textContent = 'OK'; btn.disabled = false;
     } else if (d.status === 'error') {
       es.close();
-      box.className = 'error'; box.innerHTML = '❌ Erreur : ' + d.msg;
+      box.className = 'error'; box.innerHTML = `❌ Erreur : ${d.msg}`;
       btn.disabled = false;
     }
   };
