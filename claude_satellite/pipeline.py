@@ -40,7 +40,7 @@ async def _stt(audio_data: bytes, stt_uri: str, language: str = "fr") -> str:
         await c.send("audio-stop", {})
 
         for _ in range(120):
-            evt = await asyncio.wait_for(c.recv(), timeout=10)
+            evt = await asyncio.wait_for(c.recv(), timeout=30)
             t = evt.get("type")
             log.debug("STT event: %s", {k: v for k, v in evt.items() if k != "_payload"})
             if t == "transcript":
