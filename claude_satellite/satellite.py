@@ -164,18 +164,21 @@ class WyomingWakeWordDetector:
 
     CHUNK_BYTES = int(RATE * WIDTH * CHANNELS * 80 / 1000)  # 80ms = 2560 bytes (taille native OWW)
 
-    def __init__(self, streams: dict[str, "CameraStream"], wyoming_uri: str, on_detect, debounce: float = PIPELINE_DEBOUNCE_S):
+    def __init__(self, streams: dict[str, "CameraStream"], wyoming_uri: str, on_detect,
+                 wake_word: str = "", debounce: float = PIPELINE_DEBOUNCE_S):
         self.streams = streams
         host, port = wyoming_uri.replace("tcp://", "").split(":")
         self.host = host
         self.port = int(port)
         self.on_detect = on_detect
+        self.wake_word = wake_word
         self.debounce = debounce
         self._last_detect = 0.0
 
     async def _connect(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         reader, writer = await asyncio.open_connection(self.host, self.port)
-        writer.write(_wyoming_encode("detect", {}))
+        detect_data = {"names": [self.wake_word]} if self.wake_word else {}
+        writer.write(_wyoming_encode("detect", detect_data))
         writer.write(_wyoming_encode("audio-start", {
             "rate": RATE, "width": WIDTH, "channels": CHANNELS,
         }))
@@ -251,8 +254,8 @@ class WyomingWakeWordDetector:
         """Log un warning si OWW n'a rien envoyé dans les 8s après connexion."""
         await asyncio.sleep(8)
         if not reader_task.done():
-            log.warning("OWW [%s]: aucun event reçu en 8s — modèle 'hey_jarvis' chargé ? "
-                        "Vérifier les logs du addon OpenWakeWord dans HA.", cam_name)
+            log.warning("OWW [%s]: aucun event reçu en 8s — modèle '%s' chargé dans l'addon OWW ? "
+                        "Vérifier les logs du addon OpenWakeWord dans HA.", cam_name, self.wake_word)
 
     async def _reader_loop(self, cam_name: str, reader: asyncio.StreamReader):
         """Lit les events OWW pour une caméra."""
@@ -264,6 +267,10 @@ class WyomingWakeWordDetector:
                 return
 
             if evt_type == "detection":
+                detected_name = data.get("name", "")
+                if self.wake_word and detected_name != self.wake_word:
+                    log.info("OWW [%s]: detection ignorée (nom=%s, attendu=%s)", cam_name, detected_name, self.wake_word)
+                    continue
                 now = time.monotonic()
                 if now - self._last_detect < self.debounce:
                     log.info("OWW [%s]: detection ignorée (debounce)", cam_name)
@@ -271,7 +278,7 @@ class WyomingWakeWordDetector:
                 self._last_detect = now
                 score = float(data.get("score", 1.0))
                 log.warning("Wake word! cam=%s name=%s score=%.2f rms=%.3f",
-                            cam_name, data.get("name"), score, self.streams[cam_name].rms)
+                            cam_name, detected_name, score, self.streams[cam_name].rms)
                 event = WakeEvent(
                     camera=self.streams[cam_name].camera,
                     ww_score=score,
@@ -322,6 +329,7 @@ class MultiMicSatellite:
             streams=self.streams,
             wyoming_uri=self.config.get("wyoming_wake_uri", "tcp://core-openwakeword:10400"),
             on_detect=self._on_wake,
+            wake_word=self.config.get("wake_word", ""),
         )
         tasks.append(asyncio.create_task(detector.run(), name="wyoming-wakeword"))
 
