@@ -1,1 +1,1 @@
-claude_satellite/satellite.py
+claude_satellite/pipeline.py
